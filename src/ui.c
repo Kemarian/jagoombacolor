@@ -328,7 +328,7 @@ char *const brightxt[]={"I","II","III","IIII","IIIII"};
 char *const hostname[]={"Crap","Prot","GBA","GBP","NDS"};
 char *const ctrltxt[]={"1P","2P","Link2P","Link3P","Link4P"};
 char *const bordtxt[]={"Black","Grey","Blue","None"};
-char *const scaletxt[]={"Off","1.5x Wide v10","Stretch v10"};
+char *const scaletxt[]={"Off","1.5x Wide v11","Stretch v11"};
 char *const paltxt[]=
 {
 "Pea Soup",
@@ -799,7 +799,11 @@ void changescale()
 {
 	g_scale_mode=(g_scale_mode+1)%SCALE_MODES;
 	if(g_scale_mode==SCALE_1X)
+	{
+		//stop Stretch-mode VOFS DMAs before normal mode re-arms its own
+		*(vu16*)0x40000BA=0; *(vu16*)0x40000C6=0; *(vu16*)0x40000D2=0;
 		scaling_restore();	//rebuild anything scaled mode clobbered in VRAM
+	}
 	else
 	{
 		scaling_enter();	//reset the pair cache
