@@ -80,6 +80,10 @@ static u8 sc_active;
 static u8 sc_last_lcdc;
 static u8 sc_last_wy;
 static u8 sc_flick;        // frame parity for vertical flicker phase
+static volatile u8 sc_busy; // reentrancy guard: the menu toggle calls
+                            // scaling_scaled_frame synchronously with IRQs
+                            // on; if vblank fires mid-build, the IRQ call
+                            // must skip, not interleave on half-built state
 
 static void sc_build_tables(void)
 {
@@ -346,6 +350,9 @@ void scaling_scaled_frame(void)
 	const u8 *wmap;
 	u8 *wdirty,*mdirty;
 
+	if(sc_busy) return;   // vblank hit during the synchronous menu build
+	sc_busy=1;
+
 	if(!sc_tables_ok) { sc_build_tables(); sc_tables_ok=1; }
 	if(sc_active)
 		sc_update_dirty();
@@ -509,6 +516,8 @@ void scaling_scaled_frame(void)
 		*(vu16*)0x40000C6 = 0;   // DMA1CNT_H
 		*(vu16*)0x40000D2 = 0;   // DMA2CNT_H
 	}
+
+	sc_busy=0;
 }
 
 // Transform the OAM that display_sprites just wrote into 1.5x-wide affine
