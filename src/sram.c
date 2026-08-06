@@ -46,6 +46,8 @@ EWRAM_DATA u32 save_start = SAVE_START;
 
 EWRAM_BSS int totalstatesize;		//how much SRAM is used
 EWRAM_BSS u32 sram_owner=0;
+EWRAM_BSS u32 config_checksum=0;  // Checksum of game that saved the config
+EWRAM_BSS int palette_from_config=0;  // Flag: 1 if palette was loaded from per-game config
 
 EWRAM_BSS u8 *sram_copy = NULL;      //located at ewram_start
 EWRAM_BSS u8 *lzo_workspace = NULL;  //located at ewram_start or ewram_start + 0xE000
@@ -338,6 +340,12 @@ u32 checksum(u8 *p) {
 	return sum;
 }
 #endif
+
+// Returns 1 if palette was loaded from saved per-game config
+// GFX_reset uses this to skip auto-detection
+int has_saved_palette(void) {
+	return palette_from_config;
+}
 
 void writeerror() {
 	int i;
@@ -925,7 +933,7 @@ int using_flashcart() {
 	}
 #endif
 
-	return (u32)textstart&0x8000000;
+	return 1; // Always return 1 for EZ Flash Omega DE config persistence
 }
 
 void quickload() {
@@ -1410,17 +1418,21 @@ void writeconfig()
 	}
 	configdata *cfg;
 	int i,j;
+	u32 game_chk;
 
 	if(!using_flashcart())
 		return;
 	
+	game_chk = checksum_this();
 	compressed_save = sram_copy + 0xE000;
 	current_save_file = (stateheader*)compressed_save;
 	
-	i=findstate(0,CONFIGSAVE,(stateheader**)&cfg);
-	if(i<0) {//make new config
+	// Find per-game config (cfg->zero stores game checksum)
+	i=findstate(game_chk,CONFIGSAVE,(stateheader**)&cfg);
+	if(i<0) {//make new per-game config
 		memcpy(compressed_save,&configtemplate,sizeof(configdata));
-		cfg=current_save_file;
+		cfg=(configdata*)current_save_file;
+		cfg->zero = game_chk;  // Store game checksum for findstate lookup
 	}
 //	cfg->bordercolor=bcolor;					//store current border type
 	cfg->palettebank=palettebank;				//store current DMG palette
@@ -1431,6 +1443,7 @@ void writeconfig()
 	j |= (gammavalue & 0x7)<<5;					//store current gamma setting
 	cfg->misc = j;
 	cfg->sram_checksum=sram_owner;
+	palette_from_config = 1;  // We now have a saved config
 	if(i<0) {	//create new config
 		updatestates(0,0,CONFIGSAVE);
 	} else {		//config already exists, update sram directly (faster)
@@ -1447,7 +1460,10 @@ void readconfig() {
 	if(!using_flashcart())
 		return;
 
-	i=findstate(0,CONFIGSAVE,(stateheader**)&cfg);
+	palette_from_config = 0;  // Reset flag
+	
+	// Try to find per-game config first (cfg->zero stores game checksum)
+	i=findstate(checksum_this(),CONFIGSAVE,(stateheader**)&cfg);
 	if(i>=0) {
 //		bcolor=cfg->bordercolor;
 		palettebank=cfg->palettebank;
@@ -1458,6 +1474,7 @@ void readconfig() {
 		autostate = (i & 0x10)>>4;				//restore current autostate setting
 		gammavalue = (i & 0xE0)>>5;				//restore current gamma setting
 		sram_owner=cfg->sram_checksum;
+		palette_from_config = 1;  // Found per-game config, use saved palette
 	}
 }
 /*
