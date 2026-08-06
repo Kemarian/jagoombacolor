@@ -269,7 +269,17 @@ void scaling_scaled_frame(void)
 	int P,C0,phase,slot0,nslots,hbase,ccols;
 	u16 dispcnt;
 
-	if(sc_busy) return;
+	if(sc_busy)
+	{	// mid-build reentry: skip cache work but KEEP the display coherent
+		// (re-arm the VOFS DMA from existing tables; a frame without it
+		// shows vertically-unscaled content = visible full-frame jump)
+		*(vu16*)0x40000BA = 0;
+		*(vu32*)0x40000B0 = (u32)&sc_vtab0[1];
+		*(vu32*)0x40000B4 = 0x04000012;
+		*(vu32*)0x40000B8 = 159 | (0xA240u<<16);
+		*(vu16*)0x4000012 = sc_vtab0[0];
+		return;
+	}
 	sc_busy=1;
 
 	fit = (g_scale_mode==SCALE_FIT);
