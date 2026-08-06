@@ -495,18 +495,21 @@ void scaling_scaled_frame(void)
 
 	if(g_scale_mode==SCALE_FULL)
 	{	// arm HBlank DMA: DMA0 feeds BG0VOFS, DMA1 feeds BG1VOFS.
-		// (writing the full CNT re-latches source/dest each frame)
+		// MUST disable first: internal source/dest only latch from
+		// SAD/DAD on an enable 0->1 transition. Re-enabling an already
+		// enabled channel keeps the old internal pointer, which then
+		// marches through EWRAM feeding garbage VOFS every line.
+		*(vu16*)0x40000BA = 0;                       // DMA0 off (latch reset)
 		*(vu32*)0x40000B0 = (u32)&sc_vtab0[1];       // DM0SAD
 		*(vu32*)0x40000B4 = 0x04000012;              // DM0DAD = BG0VOFS
 		*(vu32*)0x40000B8 = 159 | (0xA240u<<16);     // hblank, repeat, dest-fixed
+		*(vu16*)0x40000C6 = 0;                       // DMA1 off (latch reset)
 		if(wenable)
 		{
 			*(vu32*)0x40000BC = (u32)&sc_vtab1[1];   // DM1SAD
 			*(vu32*)0x40000C0 = 0x04000016;          // DM1DAD = BG1VOFS
 			*(vu32*)0x40000C4 = 159 | (0xA240u<<16);
 		}
-		else
-			*(vu16*)0x40000C6 = 0;                   // DMA1 off
 		*(vu16*)0x40000D2 = 0;                       // DMA2 off
 	}
 	else
