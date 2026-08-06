@@ -279,3 +279,13 @@ VRAM halving.
    enter/exit menu repeatedly; reset; load/save state.
 3. mGBA for accuracy cross-check; real Omega DE hardware (FRM screen) for flicker
    phases.
+
+## v16 diagnosis (2026-08-06, from user's catrap.gif frame-diffs)
+
+Remaining artifacts (top-of-screen VOFS "waves", sprite tearing) are BOTH
+vblank-overrun symptoms: heavy cache work inside the IRQ delays the next
+frame's DMA re-arm and OAM update into scanout. NEXT STEP: frame-budgeted
+conversion - cap cell conversions per vblank (~64), leave unfinished rows
+invalid (sc_rowok=0) to complete over following frames; display state must
+never depend on per-frame workload. Analyze future gifs with frameskip 1-2
+(ffmpeg extract + PIL diff); frameskip 5 masks the high-frequency issues.
