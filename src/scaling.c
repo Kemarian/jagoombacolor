@@ -470,7 +470,10 @@ void scaling_scaled_frame(void)
 			sc_vtab1[y] = (u16)((0   - d[y]) & 0xFF);
 		}
 		*(vu16*)0x4000012 = sc_vtab0[0];
-		sc_flick ^= 1;
+		//sc_flick ^= 1;   // v13 A/B TEST: flicker frozen to phase 0.
+		// If the blinking line artifacts from v12 become static seams,
+		// the blink was the intended flicker (judge it on FRM hardware);
+		// re-enable this line afterwards.
 	}
 	else
 		*(vu16*)0x4000012 = (u16)((scy-8) & 0xFF);
