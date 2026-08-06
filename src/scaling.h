@@ -5,8 +5,8 @@
 
 // Scaling modes for the Display Settings menu
 #define SCALE_1X        0   // Native 160x144 centered (40px borders)
-#define SCALE_15X_WIDE  1   // 1.5x horizontal -> 240x144 (fills width)
-#define SCALE_FULL      2   // 240x160: 1.5x horizontal + 10/9 vertical
+#define SCALE_FIT       1   // 180x160: 9/8 horizontal + 10/9 vertical
+#define SCALE_FULL      2   // 240x160: 3/2 horizontal + 10/9 vertical
 #define SCALE_MODES     3   // Total number of modes
 
 // Current scale mode (defined in ui.c, saved with per-game config later)
