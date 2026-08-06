@@ -92,6 +92,10 @@
  	.global _dmamode
  	
 	.global ui_border_visible
+	.global ui_border_screen
+	.global ui_border_request
+	.global VRAM_chr_lastAddr
+	.global lcdctrl0frame_
 	.global ui_y_real
 	.global ui_x
 	.global darkness
@@ -331,7 +335,15 @@ GFX_reset:	@called with CPU reset
 	movs r0,r0
 	bne 1f
 	
-	@get GBC palette
+	@Load per-game config now that ROM is loaded
+	blx_long readconfig
+	
+	@Check if we have a saved palette for this game
+	blx_long has_saved_palette
+	cmp r0,#0
+	bne 0f	@Has saved palette, skip auto-detection
+	
+	@get GBC palette (auto-detect) - only for new games without saved config
 	ldr_ r0,memmap_tbl
 	blx_long GetGbcPaletteNumber
 	@if zero, pick greyscale
@@ -339,6 +351,7 @@ GFX_reset:	@called with CPU reset
 	moveq r0,#01
 	ldr r1,=palettebank
 	strb r0,[r1]
+0:
 	bl paletteinit
 1:
 	
@@ -1623,15 +1636,27 @@ canary_value_doesnt_match:
 	strb_ r0,vblank_happened
 	
 	bl display_frame
-		
+
+	@scaled mode: skip tile-consume/HDMA work, scaling.c drives the display.
+	@consume_* must not run: they write the 0x8000 VRAM region = pair cache.
+	@Sprites still render; scaling_fix_oam rewrites them as affine 1.5x.
+	ldr r12,=g_scale_mode
+	ldrb r12,[r12]
+	tst r12,r12
+	bne 8f
+
 	bl display_sprites
 	bl consume_recent_tiles
 	bl consume_dirty_tiles
 	bl_long force_ui_at_top
-	
+
 	ldr r0,=do_gba_hdma
 	str r0,vcountfptr
-
+	b 7f
+8:
+	bl display_sprites
+	blx_long scaling_fix_oam
+7:
 	bl_long showfps_
 
 	ldmfd sp!,{r4-addy,pc}
@@ -2345,6 +2370,13 @@ update_ui_border_masks_2:
 
 display_frame:	@called at vblank
 	stmfd sp!,{globalptr,lr}
+
+	@scaled mode has its own display path (scaling.c)
+	ldr r12,=g_scale_mode
+	ldrb r12,[r12]
+	tst r12,r12
+	bne 9f
+
 	@init windows
 	mov r1,#REG_BASE
 	ldr r0,=(SCREEN_X_START*256 + (SCREEN_X_START+160))
@@ -2360,8 +2392,16 @@ display_frame:	@called at vblank
 	blne transfer_palette_
 
 	bl display_bg
-	
+
 	ldmfd sp!,{globalptr,pc}
+
+9:	@---- scaled path (scaling.c drives registers, map, cache) ----
+	ldrb_ r0,bg_cache_updateok
+	movs r0,r0
+	blne transfer_palette_
+	blx_long scaling_scaled_frame
+	ldmfd sp!,{globalptr,pc}
+	.ltorg
 
 display_bg:
 	ldrb_ r0,bg_cache_updateok
@@ -4936,8 +4976,12 @@ _lcdstat_save:
 	.byte 0 @lcdstat_save
 _scrollX:
 	.byte 0 @scrollX
+	.global scrollX
+scrollX = _scrollX
 _scrollY:
 	.byte 0 @scrollY
+	.global scrollY
+scrollY = _scrollY
 	
 _scanline:
 g_scanline:	.byte 0 @scanline
@@ -4952,8 +4996,12 @@ _ob1palette:
 	.byte 0 @ob1palette
 _windowX:
 	.byte 0 @windowX
+	.global windowX
+windowX = _windowX
 _windowY:
 	.byte 0 @windowY
+	.global windowY
+windowY = _windowY
 _BCPS_index:	
 	.byte 0 @BCPS_index  ;actually ff68
 _doublespeed:

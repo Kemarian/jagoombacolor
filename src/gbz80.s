@@ -2829,7 +2829,7 @@ doubletimer:
 	.byte 2 @doubletimer_
 _gbamode:
 request_gba_mode:
-	.byte 0 @gbamode
+	.byte 1 @gbamode - Default ON for GBA-enhanced GBC games
 request_gb_type:
 	.byte 2 @request_gb_type_
 novblankwait:

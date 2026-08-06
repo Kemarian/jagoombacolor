@@ -62,6 +62,7 @@ int find_rom_number_by_checksum(u32 sum);
 void loadstatemenu(void);
 void writeconfig(void);
 void readconfig(void);
+int has_saved_palette(void);
 
 static __inline u32 get_sram_owner()
 {

@@ -17,5 +17,6 @@
 	#include "sgb.s"
 	#include "gbpalettes.s"
 	#include "state.s"
+	#include "scaling.s"
 
 	.end

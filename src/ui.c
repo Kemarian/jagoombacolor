@@ -1,4 +1,5 @@
 #include "includes.h"
+#include "scaling.h"
 
 EWRAM_BSS u8 autoA,autoB;				//0=off, 1=on, 2=R
 EWRAM_BSS u8 stime=0;
@@ -101,7 +102,9 @@ const fptr fnlist2[]={vblset,fpsset,sleepset,swapAB,autostateset,
 autodetect_speedhack,
 #endif
 gbtype,changeautoborder,gbatype};
-const fptr fnlist3[]={chpalette,brightset,sgbpalnum};
+static void changescale(void);
+u8 g_scale_mode=0;
+const fptr fnlist3[]={chpalette,brightset,sgbpalnum,changescale};
 
 const fptr fnlist4[]={
 #if SPEEDHACKS_OLD
@@ -325,6 +328,7 @@ char *const brightxt[]={"I","II","III","IIII","IIIII"};
 char *const hostname[]={"Crap","Prot","GBA","GBP","NDS"};
 char *const ctrltxt[]={"1P","2P","Link2P","Link3P","Link4P"};
 char *const bordtxt[]={"Black","Grey","Blue","None"};
+char *const scaletxt[]={"Off","1.5x Wide v10","Stretch v10"};
 char *const paltxt[]=
 {
 "Pea Soup",
@@ -500,6 +504,7 @@ void drawui3()
 	print_2("Palette: ",paltxt[palettebank]);
 	print_2("Gamma: ",brightxt[gammavalue]);
 	print_2("SGB Palette Number: ",palnumtxt[sgb_palette_number]);
+	print_2("Scaling: ",scaletxt[g_scale_mode]);
 }
 
 void drawui4()
@@ -789,6 +794,17 @@ void gbatype()
 void sgbpalnum()
 {
 	sgb_palette_number=(sgb_palette_number+1)&3;
+}
+void changescale()
+{
+	g_scale_mode=(g_scale_mode+1)%SCALE_MODES;
+	if(g_scale_mode==SCALE_1X)
+		scaling_restore();	//rebuild anything scaled mode clobbered in VRAM
+	else
+	{
+		scaling_enter();	//reset the pair cache
+		scaling_scaled_frame();	//build cache+map now, while game is paused
+	}
 }
 void timermode()
 {
