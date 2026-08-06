@@ -56,7 +56,9 @@ EWRAM_BSS static u8  sc_vdelta[161];
 EWRAM_BSS static u16 sc_vtab0[161];
 EWRAM_BSS static u16 sc_vtab1[161];
 
+EWRAM_BSS static u8 sc_rowok[32];   // BG map row valid for current viewport
 static u16 sc_ncells, sc_tombs, sc_evict_ptr;
+static int sc_last_C0=-1, sc_last_scy=-1;
 static u8 sc_gen, sc_tables_ok, sc_active, sc_last_lcdc, sc_last_wy;
 static u8 sc_N, sc_D;               // current ratio (9/8 or 3/2)
 static volatile u8 sc_busy;         // menu-sync vs vblank reentry guard
@@ -124,7 +126,9 @@ static void sc_full_reset(void)
 	vu16 *m;
 	for(i=0;i<HASH_SIZE;i++) sc_hkey[i]=0;
 	for(i=0;i<18;i++) sc_wbuilt[i]=0;
+	for(i=0;i<32;i++) sc_rowok[i]=0;
 	sc_ncells=0; sc_tombs=0; sc_evict_ptr=0;
+	sc_last_C0=-1; sc_last_scy=-1;
 	for(i=0;i<8;i++) bt[i]=0;
 	m=SCALED_MAP; for(i=0;i<0x400;i++) m[i]=blank;
 	m=WIN_MAP;    for(i=0;i<0x400;i++) m[i]=blank;
@@ -228,14 +232,13 @@ static void sc_update_dirty(void)
 		sc_convert_obj(XGB_VRAM+0x2000+t*16,    (u32*)(OBJ_TILES+0x2000+t*32));
 		sc_convert_obj(XGB_VRAM+0x2000+(t+1)*16,(u32*)(OBJ_TILES+0x2000+(t+1)*32));
 	}
-	for(i=0;i<HASH_SIZE;i++)
-	{
-		u32 key=sc_hkey[i], a, b;
-		if(key==0 || key==KEY_TOMB) continue;
+	for(i=0;i<sc_ncells;i++)
+	{	// iterate live cells (<=688), not the 2048-slot hash
+		u32 key=sc_cell_key[i], a, b;
 		a=(key>>15)&0x1FF; b=(key>>6)&0x1FF;
 		if(TILE_DIRTY(a) || TILE_DIRTY(b))
 			sc_convert_cell(XGB_VRAM+a*16, XGB_VRAM+b*16, key&0xF,
-				sc_cell_vram(sc_hval[i]));
+				sc_cell_vram(i));
 	}
 }
 
@@ -307,15 +310,17 @@ void scaling_scaled_frame(void)
 
 	REG_BG0CNT = 3 | (1<<2) | (10<<8);         // 32x32 map now
 	*(vu16*)0x4000010 = (u16)(hbase + phase);
-	{	// vertical always on (both modes are x160)
+	if(scy != sc_last_scy)
+	{	// vertical VOFS tables depend only on scy: rebuild on change
 		int y;
 		for(y=0;y<161;y++)
 		{
 			sc_vtab0[y] = (u16)((scy - sc_vdelta[y]) & 0xFF);
 			sc_vtab1[y] = (u16)((0   - sc_vdelta[y]) & 0xFF);
 		}
-		*(vu16*)0x4000012 = sc_vtab0[0];
+		sc_last_scy = scy;
 	}
+	*(vu16*)0x4000012 = sc_vtab0[0];
 	dispcnt = 0x1140;
 	if(wenable)
 	{
@@ -370,6 +375,12 @@ void scaling_scaled_frame(void)
 		for(i=0;i<8;i++) bt[i]=0;
 	}
 
+	if(C0 != sc_last_C0)
+	{	// viewport moved: all rows must rebuild
+		int i;
+		for(i=0;i<32;i++) sc_rowok[i]=0;
+		sc_last_C0=C0;
+	}
 	row0 = scy>>3;
 	for(r=0;r<VIS_ROWS;r++)
 	{
@@ -377,11 +388,22 @@ void scaling_scaled_frame(void)
 		const u8 *mrow;
 		vu16 *out;
 		if(wenable && r>wtop+1) continue;
-		mdirty[mr]=0;                     // viewport rebuilds anyway
-		mrow = gbmap + mr*32;
 		out = SCALED_MAP + mr*32;
+		if(mdirty[mr]) { mdirty[mr]=0; sc_rowok[mr]=0; }
+		if(sc_rowok[mr])
+		{	// unchanged: just re-stamp cells so eviction skips them
+			for(j=0;j<nslots;j++)
+			{
+				u32 t=out[slot0+j]&0x3FF;
+				if(t>=TILE_BASE && t<TILE_BASE+MAX_TILES)
+					sc_cell_gen[t-TILE_BASE]=sc_gen;
+			}
+			continue;
+		}
+		mrow = gbmap + mr*32;
 		for(j=0;j<nslots;j++)
 			out[slot0+j] = sc_cell_entry(mrow,C0+j,mode8000,ccols);
+		sc_rowok[mr]=1;
 	}
 
 	if(wenable)
