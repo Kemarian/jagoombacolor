@@ -1,6 +1,16 @@
 # Tile-Domain 1.5x Scaling — Implementation Plan
 
-**Status: WORKING WIP v7 (2026-08-05). Supersedes the Mode 4 bitmap approach in [SCALING.md](SCALING.md).**
+**Status: WORKING WIP v13 (2026-08-06). Supersedes the Mode 4 bitmap approach in [SCALING.md](SCALING.md).**
+
+v8-v13 journal: scroll engine (pair-slot ring, eviction), SCALE_FULL vertical
+10/9 via HBlank-DMA VOFS tables. Hard-won fixes: menu-toggle reentrancy crash
+(sc_busy guard - the sync build raced the vblank IRQ), DMA internal-pointer
+latch (must disable before re-arm, else source marches through EWRAM), stray
+DMAs stopped on toggle-off. Flicker verdict from emulator testing: phase
+alternation reads as biased blinking, not clean 30Hz -> single-phase (static
+seams) is the default; flicker kept one-line-away for hardware A/B. Next:
+Fit Height 180x160 (9/8 horizontal) - milder artifacts than both current
+modes, correct aspect.
 
 ## Progress log (see src/scaling.c, src/scaling.s, lcd.s hooks)
 
