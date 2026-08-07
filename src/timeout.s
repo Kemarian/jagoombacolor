@@ -599,7 +599,7 @@ _irqGBZ80_:
  .section .iwram.end.105, "ax", %progbits
 @----------------------------------------------------------------------------
 fiveminutes: .word 5*60*60 @fiveminutes_
-sleeptime: .word 5*60*60 @sleeptime_
+sleeptime: .word 0x7F000000 @sleeptime_ - autosleep OFF by default (stime=3)
 dontstop: .byte 0 @dontstop_
 g_hackflags: .byte 0 @hackflags
 g_hackflags2: .byte 0 @hackflags2
