@@ -289,3 +289,25 @@ conversion - cap cell conversions per vblank (~64), leave unfinished rows
 invalid (sc_rowok=0) to complete over following frames; display state must
 never depend on per-frame workload. Analyze future gifs with frameskip 1-2
 (ffmpeg extract + PIL diff); frameskip 5 masks the high-frequency issues.
+
+## Next steps (planned 2026-08-06, priority order)
+
+1. **Autosleep OFF by default in jagoombacolor** (mirror PocketNES omega-tweaks:
+   stime=3 + matching sleeptime; remember .sbss rejects nonzero initializers -
+   move the var out of EWRAM_BSS if needed).
+2. **Regression audit: scaling OFF must equal the user's current build.** Diff
+   the tile-scaling branch against upstream for every non-scaling change and
+   confirm the normal path is untouched when g_scale_mode==0. Must keep:
+   per-game palette saving in SRAM config (sram.c/h + GFX_reset hook, with SGB
+   auto-detection still used for new games) and GBA-enhanced mode default ON
+   (gbz80.s request_gba_mode=1). New hooks must be no-ops when off: lcd.s
+   branches fall through to original code, scaling.c never runs, exports and
+   the all.s scaling.s include are inert. The baked build must not be inferior
+   to the user's current kernel (palette fixes + gba-on).
+3. **Bake into omega-de-kernel**: regenerate source/goomba.h from the new
+   jagoombacolor.gba (recipe in BUILD.md), build kernel, name ezkernel.bin.
+   Hardware flash only when 1-2 are verified (two-step update, brick risk).
+4. **Frame-budgeted conversion** (the v16 diagnosis fix): cap cell conversions
+   per vblank (~64), unfinished rows stay invalid and complete next frames -
+   kills top-of-screen VOFS waves + sprite tearing from vblank overrun.
+5. Then: sprite seam polish, multi-palette DMG colorization, CGB attrs.
