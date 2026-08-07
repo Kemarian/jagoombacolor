@@ -311,3 +311,23 @@ never depend on per-frame workload. Analyze future gifs with frameskip 1-2
    per vblank (~64), unfinished rows stay invalid and complete next frames -
    kills top-of-screen VOFS waves + sprite tearing from vblank overrun.
 5. Then: sprite seam polish, multi-palette DMG colorization, CGB attrs.
+
+## v20dbg profiler verdict (2026-08-07): the viewport walk is too heavy
+
+Backdrop raster bars measured it: panning frames run RED to scanline ~69
+and GREEN (OAM pass) to ~97; worst frames RED through all 160. The scaler
+eats 40-100% of frame time - THE cause of slowdown + seam jitter + busy
+cascades. Budget capped conversions but not the bookkeeping: a C0 change
+rewrites all ~500 visible cells (lookups + VRAM-read stamps) every frame.
+
+v21 restructure:
+1. Ring viewport: slot = C mod 64 in a 64x32 map -> panning builds ONLY the
+   entering column (~19 lookups/frame). Content wrap (period 36/48 vs 64)
+   breaks adjacency only when the window spans the seam -> full rebuild
+   accepted there (once per 288/384px scrolled).
+2. Stamp rotation: protect visible cells by stamping 1/8 of rows per frame
+   (evictor tolerates gen age 16) instead of ~500 VRAM reads every frame.
+3. Guarantee-early display programming: registers/VOFS/DMA in the first
+   lines of vblank ALWAYS; map/VRAM updates may trickle after (cells keep
+   old content until replaced - mid-scan cell swap is a 1-line-late detail,
+   not a torn frame).
