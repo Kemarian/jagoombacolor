@@ -336,6 +336,9 @@ void scaling_scaled_frame(void)
 		return;
 	}
 	sc_busy=1;
+	*(vu16*)0x05000000 = 0x001F;   // TIMING DEBUG: backdrop red while
+	                               // scaled-frame work runs (side borders
+	                               // show it as a raster bar in captures)
 
 	// per-frame conversion budget (~64 cells ≈ 30k cycles, fits vblank
 	// beside the rest); menu-toggle builds run unbounded (game paused)
@@ -373,7 +376,7 @@ void scaling_scaled_frame(void)
 		vu16 *pal=(vu16*)0x05000100;
 		u16 *src=(u16*)gbc_palette;
 		pal[1]=src[0]; pal[2]=src[1]; pal[3]=src[2]; pal[4]=src[3];
-		*(vu16*)0x05000000 = 0;
+		// (backdrop write removed for TIMING DEBUG - markers own it)
 	}
 	wenable = (lcdc&0x20) && windowY<144 && windowX<8;
 	wtop = windowY>>3;
@@ -515,6 +518,7 @@ void scaling_scaled_frame(void)
 		}
 	}
 
+	*(vu16*)0x05000000 = 0;        // TIMING DEBUG: work done -> black
 	sc_busy=0;
 }
 
@@ -526,6 +530,7 @@ void scaling_fix_oam(void)
 	vu16 *oam=(vu16*)0x07000000;
 	int i;
 	int ysh = (lcdctrl0frame_ & 0x04) ? 8 : 4;
+	*(vu16*)0x05000000 = 0x03E0;   // TIMING DEBUG: green during OAM pass
 	int fit = (g_scale_mode==SCALE_FIT);
 	u16 pa = fit ? 227 : 170;                  // 256*8/9 / 256*2/3
 	u16 pd = 230;                              // 256*9/10 (both modes)
@@ -554,4 +559,5 @@ void scaling_fix_oam(void)
 		oam[i*4]   = a0;
 		oam[i*4+1] = a1;
 	}
+	*(vu16*)0x05000000 = 0;        // TIMING DEBUG: all vblank work done
 }
