@@ -2,7 +2,7 @@
 #include "scaling.h"
 
 EWRAM_BSS u8 autoA,autoB;				//0=off, 1=on, 2=R
-EWRAM_BSS u8 stime=0;
+u8 stime=3;	//autosleep OFF by default (not EWRAM_BSS: .sbss rejects nonzero init)
 EWRAM_BSS u8 autostate=0;
 EWRAM_BSS int main_ui_selection;
 //EWRAM_BSS int selected;//selected menuitem.  used by all menus.
