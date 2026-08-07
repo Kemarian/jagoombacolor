@@ -63,6 +63,16 @@ static u8 sc_gen, sc_tables_ok, sc_active, sc_last_lcdc, sc_last_wy;
 static u8 sc_N, sc_D;               // current ratio (9/8 or 3/2)
 static volatile u8 sc_busy;         // menu-sync vs vblank reentry guard
 
+// Frame work budget: display state must never depend on workload, so cell
+// conversions are capped per vblank; unfinished rows/sweeps resume next
+// frame (stale content beats torn scanout). Menu toggles build unbounded
+// (game paused, overrun invisible).
+static int sc_budget;
+static u8 sc_menu_build;
+static u8 sc_sweep_active;          // dirty-reconvert sweep in progress
+static u16 sc_sweep_obj;            // next OBJ tile pair (0..128)
+static u16 sc_sweep_cell;           // next cache cell
+
 static void sc_build_tables(void)
 {
 	int b,i,p,x;
@@ -194,8 +204,10 @@ static u32 sc_lookup(u32 a,u32 b,u32 p)
 		else if(k==0)   { if(first==HASH_SIZE) first=h; break; }
 		h=(h+1)&(HASH_SIZE-1);
 	}
+	if(sc_budget<=0) return 0;      // out of frame budget: caller retries
 	c=sc_alloc_cell();
 	if(c>=MAX_TILES) return BLANK_TILE;
+	sc_budget--;
 	sc_convert_cell(XGB_VRAM+a*16, XGB_VRAM+b*16, p, sc_cell_vram(c));
 	sc_cell_key[c]=key; sc_cell_gen[c]=sc_gen;
 	if(sc_hkey[first]==KEY_TOMB) sc_tombs--;
@@ -208,6 +220,7 @@ void scaling_enter(void)
 {
 	sc_active=0;
 	sc_tables_ok=0;   // ratio may change between modes: rebuild tables
+	sc_menu_build=1;  // the synchronous menu build runs unbudgeted
 }
 
 #define TILE_DIRTY(t) ((sc_dirty_snap[(t)>>6] >> (((t)>>1)&31)) & 1)
@@ -215,30 +228,49 @@ void scaling_enter(void)
 static void sc_update_dirty(void)
 {
 	int i;
-	u32 acc=0, t;
+	u32 acc=0;
 	for(i=0;i<12;i++)
-	{
-		sc_dirty_snap[i]=DIRTY_TILE_BITS[i];
-		acc|=sc_dirty_snap[i];
-		DIRTY_TILE_BITS[i]=0;
+	{	// ACCUMULATE into the snapshot: it persists until a sweep finishes
+		u32 d=DIRTY_TILE_BITS[i];
+		if(d) { sc_dirty_snap[i]|=d; acc|=d; DIRTY_TILE_BITS[i]=0; }
 	}
-	if(!acc) return;
-	VRAM_chr_lastAddr=0xFF;
-	for(t=0;t<256;t+=2)
+	if(acc)
+	{	// new writes: (re)start the sweep from the top
+		VRAM_chr_lastAddr=0xFF;
+		sc_sweep_active=1;
+		sc_sweep_obj=0;
+		sc_sweep_cell=0;
+	}
+	if(!sc_sweep_active) return;
+
+	// OBJ tiles first (sprite glitches are the most visible staleness)
+	while(sc_sweep_obj<128 && sc_budget>0)
 	{
+		u32 t=sc_sweep_obj*2;
+		sc_sweep_obj++;
 		if(!TILE_DIRTY(t)) continue;
 		sc_convert_obj(XGB_VRAM+t*16,           (u32*)(OBJ_TILES+t*32));
 		sc_convert_obj(XGB_VRAM+(t+1)*16,       (u32*)(OBJ_TILES+(t+1)*32));
 		sc_convert_obj(XGB_VRAM+0x2000+t*16,    (u32*)(OBJ_TILES+0x2000+t*32));
 		sc_convert_obj(XGB_VRAM+0x2000+(t+1)*16,(u32*)(OBJ_TILES+0x2000+(t+1)*32));
+		sc_budget--;
 	}
-	for(i=0;i<sc_ncells;i++)
-	{	// iterate live cells (<=688), not the 2048-slot hash
-		u32 key=sc_cell_key[i], a, b;
+	while(sc_sweep_cell<sc_ncells && sc_budget>0)
+	{
+		u32 key=sc_cell_key[sc_sweep_cell], a, b;
 		a=(key>>15)&0x1FF; b=(key>>6)&0x1FF;
 		if(TILE_DIRTY(a) || TILE_DIRTY(b))
+		{
 			sc_convert_cell(XGB_VRAM+a*16, XGB_VRAM+b*16, key&0xF,
-				sc_cell_vram(i));
+				sc_cell_vram(sc_sweep_cell));
+			sc_budget--;
+		}
+		sc_sweep_cell++;
+	}
+	if(sc_sweep_obj>=128 && sc_sweep_cell>=sc_ncells)
+	{	// sweep complete: everything converted from current tile data
+		sc_sweep_active=0;
+		for(i=0;i<12;i++) sc_dirty_snap[i]=0;
 	}
 }
 
@@ -256,7 +288,11 @@ static u16 sc_cell_entry(const u8 *mrow,int C,int mode8000,int ccols)
 		if(a<128) a+=256;
 		if(b<128) b+=256;
 	}
-	return (u16)(sc_lookup(a,b,p) | (BG_PAL<<12));
+	{
+		u32 t=sc_lookup(a,b,p);
+		if(!t) return 0;            // budget exhausted: retry next frame
+		return (u16)(t | (BG_PAL<<12));
+	}
 }
 
 void scaling_scaled_frame(void)
@@ -281,6 +317,11 @@ void scaling_scaled_frame(void)
 		return;
 	}
 	sc_busy=1;
+
+	// per-frame conversion budget (~64 cells ≈ 30k cycles, fits vblank
+	// beside the rest); menu-toggle builds run unbounded (game paused)
+	sc_budget = sc_menu_build ? 0x7FFFFFFF : 64;
+	sc_menu_build = 0;
 
 	fit = (g_scale_mode==SCALE_FIT);
 	sc_N = fit ? 9 : 3;
@@ -411,9 +452,16 @@ void scaling_scaled_frame(void)
 			continue;
 		}
 		mrow = gbmap + mr*32;
-		for(j=0;j<nslots;j++)
-			out[slot0+j] = sc_cell_entry(mrow,C0+j,mode8000,ccols);
-		sc_rowok[mr]=1;
+		{
+			int complete=1;
+			for(j=0;j<nslots;j++)
+			{
+				u16 e = sc_cell_entry(mrow,C0+j,mode8000,ccols);
+				if(!e) { complete=0; continue; }  // keep old entry, retry
+				out[slot0+j] = e;
+			}
+			if(complete) sc_rowok[mr]=1;
+		}
 	}
 
 	if(wenable)
@@ -436,9 +484,14 @@ void scaling_scaled_frame(void)
 			}
 			else
 			{
+				int complete=1;
 				for(j=0;j<wcols;j++)
-					out[j] = sc_cell_entry(mrow,j,mode8000,ccols);
-				sc_wbuilt[r]=1;
+				{
+					u16 e = sc_cell_entry(mrow,j,mode8000,ccols);
+					if(!e) { complete=0; continue; }
+					out[j] = e;
+				}
+				if(complete) sc_wbuilt[r]=1;
 			}
 		}
 	}
