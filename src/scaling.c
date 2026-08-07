@@ -56,9 +56,13 @@ EWRAM_BSS static u8  sc_vdelta[161];
 EWRAM_BSS static u16 sc_vtab0[161];
 EWRAM_BSS static u16 sc_vtab1[161];
 
-EWRAM_BSS static u8 sc_rowok[32];   // BG map row valid for current viewport
+EWRAM_BSS static u16 sc_row_c0[32]; // per BG row: C0 the row was built for
+                                    // (0xFFFF = invalid). Ring viewport:
+                                    // slot = column & 63 in the 64x32 map,
+                                    // so scrolling reuses all cells and
+                                    // only entering columns get built.
 static u16 sc_ncells, sc_tombs, sc_evict_ptr;
-static int sc_last_C0=-1, sc_last_scy=-1;
+static int sc_last_scy=-1;
 static u8 sc_gen, sc_tables_ok, sc_active, sc_last_lcdc, sc_last_wy;
 static u8 sc_N, sc_D;               // current ratio (9/8 or 3/2)
 static volatile u8 sc_busy;         // menu-sync vs vblank reentry guard
@@ -136,11 +140,11 @@ static void sc_full_reset(void)
 	vu16 *m;
 	for(i=0;i<HASH_SIZE;i++) sc_hkey[i]=0;
 	for(i=0;i<18;i++) sc_wbuilt[i]=0;
-	for(i=0;i<32;i++) sc_rowok[i]=0;
+	for(i=0;i<32;i++) sc_row_c0[i]=0xFFFF;
 	sc_ncells=0; sc_tombs=0; sc_evict_ptr=0;
-	sc_last_C0=-1; sc_last_scy=-1;
+	sc_last_scy=-1;
 	for(i=0;i<8;i++) bt[i]=0;
-	m=SCALED_MAP; for(i=0;i<0x400;i++) m[i]=blank;
+	m=SCALED_MAP; for(i=0;i<0x800;i++) m[i]=blank;   // both blocks (64x32)
 	m=WIN_MAP;    for(i=0;i<0x400;i++) m[i]=blank;
 }
 
@@ -176,7 +180,8 @@ static u32 sc_alloc_cell(void)
 	{
 		u32 c=sc_evict_ptr;
 		sc_evict_ptr = (sc_evict_ptr+1)==MAX_TILES ? 0 : sc_evict_ptr+1;
-		if(sc_cell_gen[c]!=sc_gen)
+		// stamps rotate over 8 frames now: only evict clearly old cells
+		if((u8)(sc_gen - sc_cell_gen[c]) > 16)
 		{
 			sc_hash_del(sc_cell_key[c]);
 			return c;
@@ -304,6 +309,24 @@ static u16 sc_cell_entry(const u8 *mrow,int C,int mode8000,int ccols)
 	}
 }
 
+// Write one entry into the 64x32 ring map: slot 32..63 = second block.
+static void sc_map_put(int mr,int slot,u16 e)
+{
+	slot&=63;
+	SCALED_MAP[mr*32 + (slot&31) + ((slot&32)<<5)] = e;
+}
+static u16 sc_map_get(int mr,int slot)
+{
+	slot&=63;
+	return SCALED_MAP[mr*32 + (slot&31) + ((slot&32)<<5)];
+}
+static void sc_stamp_slot(int mr,int slot)
+{
+	u32 t=sc_map_get(mr,slot)&0x3FF;
+	if(t>=TILE_BASE && t<TILE_BASE+MAX_TILES)
+		sc_cell_gen[t-TILE_BASE]=sc_gen;
+}
+
 void scaling_scaled_frame(void)
 {
 	u8 lcdc;
@@ -311,15 +334,13 @@ void scaling_scaled_frame(void)
 	u8 *wdirty, *mdirty;
 	int mode8000,r,j,scy,scx,row0;
 	int wenable,wtop,fit;
-	int P,C0,phase,slot0,nslots,hbase,ccols;
-	u16 dispcnt;
+	int P,C0,phase,ccols,ncontent,guardL,guardR;
+	u16 dispcnt, blank;
 
 	if(sc_busy)
-	{	// mid-build reentry: skip cache work but KEEP the display coherent.
-		// BOTH VOFS DMAs must be disabled+re-armed (disable first: the
-		// source only re-latches on a 0->1 enable) - v18 bug: only DMA0
-		// was handled here, so busy frames fed BG1 (window layer) from a
-		// marching stale source = glitching HUD/menu bar.
+	{	// mid-build reentry: skip work but keep the display coherent
+		// (both VOFS DMAs must be disabled+re-armed: source only
+		// re-latches on a 0->1 enable transition)
 		*(vu16*)0x40000BA = 0;
 		*(vu32*)0x40000B0 = (u32)&sc_vtab0[1];
 		*(vu32*)0x40000B4 = 0x04000012;
@@ -336,55 +357,28 @@ void scaling_scaled_frame(void)
 		return;
 	}
 	sc_busy=1;
-	*(vu16*)0x05000000 = 0x001F;   // TIMING DEBUG: backdrop red while
-	                               // scaled-frame work runs (side borders
-	                               // show it as a raster bar in captures)
+	*(vu16*)0x05000000 = 0x001F;   // TIMING DEBUG: red while building
 
-	// per-frame conversion budget (~64 cells ≈ 30k cycles, fits vblank
-	// beside the rest); menu-toggle builds run unbounded (game paused)
-	sc_budget = sc_menu_build ? 0x7FFFFFFF : 64;
-	sc_menu_build = 0;
-
+	// ---- PHASE A: display programming, guaranteed early ----
 	fit = (g_scale_mode==SCALE_FIT);
 	sc_N = fit ? 9 : 3;
 	sc_D = fit ? 8 : 2;
 	if(!sc_tables_ok) { sc_build_tables(); sc_tables_ok=1; }
-	if(!sc_active)
-	{
-		int i;
-		sc_full_reset();
-		sc_active=1;
-		for(i=0;i<12;i++) DIRTY_TILE_BITS[i]=0;
-		VRAM_chr_lastAddr=0xFF;
-	}
-	sc_gen++;
 
 	lcdc = lcdctrl0frame_;
 	scy = scrollY; scx = scrollX;
 	ccols = (32*sc_N)/sc_D;                    // 36 (fit) / 48 (stretch)
-	// layout: fit centers 180px (content in slots 4..27, HOFS base 2);
-	// stretch fills (slots 0..30, HOFS base 0)
-	slot0  = fit ? 4  : 0;
-	nslots = fit ? 24 : 31;
-	hbase  = fit ? (32 - 30) : 0;              // slot0*8 - border(30) = 2
-	P  = (scx*sc_N)/sc_D;                      // scaled scroll position
+	ncontent = fit ? 24 : 31;
+	guardL   = fit ? 4  : 0;
+	guardR   = fit ? 5  : 1;
+	P  = (scx*sc_N)/sc_D;
 	C0 = P>>3;
 	phase = P&7;
-
-	// ---- registers, palette, vertical tables, DMA: FIRST ----
-	{
-		vu16 *pal=(vu16*)0x05000100;
-		u16 *src=(u16*)gbc_palette;
-		pal[1]=src[0]; pal[2]=src[1]; pal[3]=src[2]; pal[4]=src[3];
-		// (backdrop write removed for TIMING DEBUG - markers own it)
-	}
 	wenable = (lcdc&0x20) && windowY<144 && windowX<8;
 	wtop = windowY>>3;
 
-	REG_BG0CNT = 3 | (1<<2) | (10<<8);         // 32x32 map now
-	*(vu16*)0x4000010 = (u16)(hbase + phase);
 	if(scy != sc_last_scy)
-	{	// vertical VOFS tables depend only on scy: rebuild on change
+	{
 		int y;
 		for(y=0;y<161;y++)
 		{
@@ -393,12 +387,16 @@ void scaling_scaled_frame(void)
 		}
 		sc_last_scy = scy;
 	}
+
+	REG_BG0CNT = 3 | (1<<2) | (10<<8) | (1<<14);            // 64x32 ring
+	*(vu16*)0x4000010 = (u16)(((C0&63)*8 + phase - (fit?30:0)) & 0x1FF);
 	*(vu16*)0x4000012 = sc_vtab0[0];
+
 	dispcnt = 0x1140;
 	if(wenable)
 	{
 		*(vu16*)0x400000A = 2 | (1<<2) | (12<<8);
-		*(vu16*)0x4000014 = (u16)(fit ? -30 : 0); // window left at border edge
+		*(vu16*)0x4000014 = (u16)(fit ? -30 : 0);
 		*(vu16*)0x4000016 = sc_vtab1[0];
 		dispcnt |= 0x0200;
 	}
@@ -410,8 +408,8 @@ void scaling_scaled_frame(void)
 		dispcnt |= 0x0800;
 	}
 	*(vu16*)0x4000000 = dispcnt;
-	// arm VOFS HBlank DMAs (disable first: SAD only latches on 0->1)
-	*(vu16*)0x40000BA = 0;
+
+	*(vu16*)0x40000BA = 0;                     // disable-first: relatch SAD
 	*(vu32*)0x40000B0 = (u32)&sc_vtab0[1];
 	*(vu32*)0x40000B4 = 0x04000012;
 	*(vu32*)0x40000B8 = 159 | (0xA240u<<16);
@@ -424,21 +422,41 @@ void scaling_scaled_frame(void)
 	}
 	*(vu16*)0x40000D2 = 0;
 
-	// ---- heavy work: dirty reconverts + viewport map build ----
-	if(sc_active) sc_update_dirty();
+	{	// palette (entries 1..4 of BG palette 8)
+		vu16 *pal=(vu16*)0x05000100;
+		u16 *src=(u16*)gbc_palette;
+		pal[1]=src[0]; pal[2]=src[1]; pal[3]=src[2]; pal[4]=src[3];
+	}
+
+	// ---- PHASE B: budgeted build work (may run past vblank safely) ----
+	sc_budget = sc_menu_build ? 0x7FFFFFFF : 64;
+	sc_menu_build = 0;
+	if(!sc_active)
+	{
+		int i;
+		sc_full_reset();
+		sc_active=1;
+		for(i=0;i<12;i++) DIRTY_TILE_BITS[i]=0;
+		VRAM_chr_lastAddr=0xFF;
+	}
+	sc_gen++;
+	sc_update_dirty();
 
 	gbmap  = XGB_VRAM + ((lcdc&0x08) ? 0x1C00 : 0x1800);
 	mode8000 = lcdc&0x10;
 	mdirty = dirty_map_words + ((lcdc&0x08) ? 32 : 0);
 	wmap   = XGB_VRAM + ((lcdc&0x40) ? 0x1C00 : 0x1800);
 	wdirty = dirty_map_words + ((lcdc&0x40) ? 32 : 0);
+	blank = BLANK_TILE | (BG_PAL<<12);
 	if(((lcdc ^ sc_last_lcdc) & 0x78) || windowY != sc_last_wy)
 	{
 		int i;
 		vu16 *m=WIN_MAP;
-		u16 blank=BLANK_TILE|(BG_PAL<<12);
 		for(i=0;i<0x400;i++) m[i]=blank;
 		for(i=0;i<18;i++) sc_wbuilt[i]=0;
+		// BG rows hidden behind the window aren't stamped and may have
+		// been evicted: force rebuild when the window layout changes
+		for(i=0;i<32;i++) sc_row_c0[i]=0xFFFF;
 	}
 	sc_last_lcdc=lcdc; sc_last_wy=windowY;
 
@@ -448,63 +466,68 @@ void scaling_scaled_frame(void)
 		for(i=0;i<8;i++) bt[i]=0;
 	}
 
-	if(C0 != sc_last_C0)
-	{	// viewport moved: all rows must rebuild
-		int i;
-		for(i=0;i<32;i++) sc_rowok[i]=0;
-		sc_last_C0=C0;
-	}
+	// ---- BG0 ring viewport ----
 	row0 = scy>>3;
 	for(r=0;r<VIS_ROWS;r++)
 	{
 		int mr=(row0+r)&31;
 		const u8 *mrow;
-		vu16 *out;
+		u16 st;
 		if(wenable && r>wtop+1) continue;
-		out = SCALED_MAP + mr*32;
-		if(mdirty[mr]) { mdirty[mr]=0; sc_rowok[mr]=0; }
-		// ALWAYS stamp the row's current cells - including rows awaiting
-		// rebuild: their old entries stay on screen until replaced, and an
-		// unstamped cell can be evicted+reused = garbage tiles (v17 bug)
-		for(j=0;j<nslots;j++)
-		{
-			u32 t=out[slot0+j]&0x3FF;
-			if(t>=TILE_BASE && t<TILE_BASE+MAX_TILES)
-				sc_cell_gen[t-TILE_BASE]=sc_gen;
-		}
-		if(sc_rowok[mr])
+		st = sc_row_c0[mr];
+		if(mdirty[mr]) { mdirty[mr]=0; st=0xFFFF; }
+		if(st==(u16)C0)
+		{	// valid: rotate eviction stamps (1/8 of rows per frame)
+			if(((mr^sc_gen)&7)==0)
+				for(j=0;j<ncontent;j++) sc_stamp_slot(mr,C0+j);
+			sc_row_c0[mr]=st;
 			continue;
+		}
 		mrow = gbmap + mr*32;
-		{
+		if(st==(u16)(C0-1) || st==(u16)(C0+1))
+		{	// panning: build only the entering column
+			int A = (st==(u16)(C0-1)) ? C0+ncontent-1 : C0;
+			u16 e = sc_cell_entry(mrow,A,mode8000,ccols);
+			if(!e) continue;               // budget: retry next frame
+			sc_map_put(mr,A,e);
+		}
+		else
+		{	// teleport/new row: full rebuild (budget-gated)
 			int complete=1;
-			for(j=0;j<nslots;j++)
+			for(j=0;j<ncontent;j++)
 			{
 				u16 e = sc_cell_entry(mrow,C0+j,mode8000,ccols);
-				if(!e) { complete=0; continue; }  // keep old entry, retry
-				out[slot0+j] = e;
+				if(!e) { complete=0; continue; }
+				sc_map_put(mr,C0+j,e);
 			}
-			if(complete) sc_rowok[mr]=1;
+			if(!complete) continue;
 		}
+		for(j=1;j<=guardL;j++) sc_map_put(mr,C0-j,blank);
+		for(j=0;j<guardR;j++)  sc_map_put(mr,C0+ncontent+j,blank);
+		sc_row_c0[mr]=(u16)C0;
 	}
 
+	// ---- BG1 window layer (screen-fixed) ----
 	if(wenable)
 	{
-		int wcols = fit ? 23 : 30;        // 180px vs 240px of window
+		int wcols = fit ? 23 : 30;
 		for(r=wtop;r<18;r++)
 		{
 			int wr=r-wtop;
 			const u8 *mrow = wmap + wr*32;
 			vu16 *out = WIN_MAP + r*32;
 			if(wdirty[wr]) { wdirty[wr]=0; sc_wbuilt[r]=0; }
-			// always stamp current cells (incl. rows awaiting rebuild -
-			// old entries stay visible and must not be evicted)
-			for(j=0;j<wcols;j++)
+			if(sc_wbuilt[r])
 			{
-				u32 t=out[j]&0x3FF;
-				if(t>=TILE_BASE && t<TILE_BASE+MAX_TILES)
-					sc_cell_gen[t-TILE_BASE]=sc_gen;
+				if(((r^sc_gen)&7)==0)
+					for(j=0;j<wcols;j++)
+					{
+						u32 t=out[j]&0x3FF;
+						if(t>=TILE_BASE && t<TILE_BASE+MAX_TILES)
+							sc_cell_gen[t-TILE_BASE]=sc_gen;
+					}
 			}
-			if(!sc_wbuilt[r])
+			else
 			{
 				int complete=1;
 				for(j=0;j<wcols;j++)
