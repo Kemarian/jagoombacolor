@@ -235,25 +235,34 @@ static void sc_update_dirty(void)
 		if(d) { sc_dirty_snap[i]|=d; acc|=d; DIRTY_TILE_BITS[i]=0; }
 	}
 	if(acc)
-	{	// new writes: (re)start the sweep from the top
+	{
 		VRAM_chr_lastAddr=0xFF;
-		sc_sweep_active=1;
-		sc_sweep_obj=0;
-		sc_sweep_cell=0;
+		if(!sc_sweep_active)
+		{	// start a sweep only if none is running; an active sweep just
+			// absorbs the merged bits (tiles it already passed re-dirty
+			// DIRTY_TILE_BITS on the next write and get the next sweep)
+			sc_sweep_active=1;
+			sc_sweep_obj=0;
+			sc_sweep_cell=0;
+		}
 	}
 	if(!sc_sweep_active) return;
 
-	// OBJ tiles first (sprite glitches are the most visible staleness)
-	while(sc_sweep_obj<128 && sc_budget>0)
+	// OBJ tiles first, on their OWN budget: OAM may already reference the
+	// new tile index this frame, so a deferred OBJ convert = torn sprite.
 	{
-		u32 t=sc_sweep_obj*2;
-		sc_sweep_obj++;
-		if(!TILE_DIRTY(t)) continue;
-		sc_convert_obj(XGB_VRAM+t*16,           (u32*)(OBJ_TILES+t*32));
-		sc_convert_obj(XGB_VRAM+(t+1)*16,       (u32*)(OBJ_TILES+(t+1)*32));
-		sc_convert_obj(XGB_VRAM+0x2000+t*16,    (u32*)(OBJ_TILES+0x2000+t*32));
-		sc_convert_obj(XGB_VRAM+0x2000+(t+1)*16,(u32*)(OBJ_TILES+0x2000+(t+1)*32));
-		sc_budget--;
+		int obudget=24;
+		while(sc_sweep_obj<128 && obudget>0)
+		{
+			u32 t=sc_sweep_obj*2;
+			sc_sweep_obj++;
+			if(!TILE_DIRTY(t)) continue;
+			sc_convert_obj(XGB_VRAM+t*16,           (u32*)(OBJ_TILES+t*32));
+			sc_convert_obj(XGB_VRAM+(t+1)*16,       (u32*)(OBJ_TILES+(t+1)*32));
+			sc_convert_obj(XGB_VRAM+0x2000+t*16,    (u32*)(OBJ_TILES+0x2000+t*32));
+			sc_convert_obj(XGB_VRAM+0x2000+(t+1)*16,(u32*)(OBJ_TILES+0x2000+(t+1)*32));
+			obudget--;
+		}
 	}
 	while(sc_sweep_cell<sc_ncells && sc_budget>0)
 	{
@@ -441,16 +450,17 @@ void scaling_scaled_frame(void)
 		if(wenable && r>wtop+1) continue;
 		out = SCALED_MAP + mr*32;
 		if(mdirty[mr]) { mdirty[mr]=0; sc_rowok[mr]=0; }
-		if(sc_rowok[mr])
-		{	// unchanged: just re-stamp cells so eviction skips them
-			for(j=0;j<nslots;j++)
-			{
-				u32 t=out[slot0+j]&0x3FF;
-				if(t>=TILE_BASE && t<TILE_BASE+MAX_TILES)
-					sc_cell_gen[t-TILE_BASE]=sc_gen;
-			}
-			continue;
+		// ALWAYS stamp the row's current cells - including rows awaiting
+		// rebuild: their old entries stay on screen until replaced, and an
+		// unstamped cell can be evicted+reused = garbage tiles (v17 bug)
+		for(j=0;j<nslots;j++)
+		{
+			u32 t=out[slot0+j]&0x3FF;
+			if(t>=TILE_BASE && t<TILE_BASE+MAX_TILES)
+				sc_cell_gen[t-TILE_BASE]=sc_gen;
 		}
+		if(sc_rowok[mr])
+			continue;
 		mrow = gbmap + mr*32;
 		{
 			int complete=1;
@@ -473,16 +483,15 @@ void scaling_scaled_frame(void)
 			const u8 *mrow = wmap + wr*32;
 			vu16 *out = WIN_MAP + r*32;
 			if(wdirty[wr]) { wdirty[wr]=0; sc_wbuilt[r]=0; }
-			if(sc_wbuilt[r])
-			{	// re-stamp so eviction skips these cells
-				for(j=0;j<wcols;j++)
-				{
-					u32 t=out[j]&0x3FF;
-					if(t>=TILE_BASE && t<TILE_BASE+MAX_TILES)
-						sc_cell_gen[t-TILE_BASE]=sc_gen;
-				}
+			// always stamp current cells (incl. rows awaiting rebuild -
+			// old entries stay visible and must not be evicted)
+			for(j=0;j<wcols;j++)
+			{
+				u32 t=out[j]&0x3FF;
+				if(t>=TILE_BASE && t<TILE_BASE+MAX_TILES)
+					sc_cell_gen[t-TILE_BASE]=sc_gen;
 			}
-			else
+			if(!sc_wbuilt[r])
 			{
 				int complete=1;
 				for(j=0;j<wcols;j++)
