@@ -73,6 +73,9 @@ static volatile u8 sc_busy;         // menu-sync vs vblank reentry guard
 // (game paused, overrun invisible).
 static int sc_budget;
 static u8 sc_menu_build;
+static u8 sc_wst_cur;     // debounced window state: 0x80|wtop, 0 = off.
+static u8 sc_wst_pend;    // games move WX/WY mid-frame; our once-per-
+static u8 sc_wst_cnt;     // vblank sample flip-flops without debounce
 static u8 sc_sweep_active;          // dirty-reconvert sweep in progress
 static u16 sc_sweep_obj;            // next OBJ tile pair (0..128)
 static u16 sc_sweep_cell;           // next cache cell
@@ -352,7 +355,7 @@ void scaling_scaled_frame(void)
 		*(vu32*)0x40000B8 = 159 | (0xA240u<<16);
 		*(vu16*)0x4000012 = sc_vtab0[0];
 		*(vu16*)0x40000C6 = 0;
-		if((lcdctrl0frame_&0x20) && windowY<144 && windowX<8)
+		if(sc_wst_cur>>7)   // debounced window state
 		{
 			*(vu32*)0x40000BC = (u32)&sc_vtab1[1];
 			*(vu32*)0x40000C0 = 0x04000016;
@@ -379,8 +382,20 @@ void scaling_scaled_frame(void)
 	P  = (scx*sc_N)/sc_D;
 	C0 = P>>3;
 	phase = P&7;
-	wenable = (lcdc&0x20) && windowY<144 && windowX<8;
-	wtop = windowY>>3;
+	{	// window state with 3-frame debounce (mid-frame WX/WY tricks make
+		// the raw per-vblank sample oscillate)
+		int rawen = (lcdc&0x20) && windowY<144 && windowX<8;
+		u8 raw = rawen ? (u8)(0x80 | (windowY>>3)) : 0;
+		if(raw==sc_wst_cur)
+			sc_wst_cnt=0;
+		else if(raw==sc_wst_pend)
+		{
+			if(++sc_wst_cnt>=3) { sc_wst_cur=raw; sc_wst_cnt=0; }
+		}
+		else { sc_wst_pend=raw; sc_wst_cnt=1; }
+		wenable = sc_wst_cur>>7;
+		wtop = sc_wst_cur & 0x1F;
+	}
 
 	if(scy != sc_last_scy)
 	{
@@ -453,7 +468,7 @@ void scaling_scaled_frame(void)
 	wmap   = XGB_VRAM + ((lcdc&0x40) ? 0x1C00 : 0x1800);
 	wdirty = dirty_map_words + ((lcdc&0x40) ? 32 : 0);
 	blank = BLANK_TILE | (BG_PAL<<12);
-	if(((lcdc ^ sc_last_lcdc) & 0x78) || (windowY>>3) != (sc_last_wy>>3))
+	if(((lcdc ^ sc_last_lcdc) & 0x58) || sc_wst_cur != sc_last_wy)
 	{
 		int i;
 		vu16 *m=WIN_MAP;
@@ -463,7 +478,8 @@ void scaling_scaled_frame(void)
 		// been evicted: force rebuild when the window layout changes
 		for(i=0;i<32;i++) sc_row_c0[i]=0xFFFF;
 	}
-	sc_last_lcdc=lcdc; sc_last_wy=windowY;
+	sc_last_lcdc=lcdc; sc_last_wy=sc_wst_cur;   // (sc_last_wy now tracks
+	                                            // the debounced state)
 
 	{	// blank-tile insurance
 		u32 *bt=(u32*)(CHARBASE1 + BLANK_TILE*32);
