@@ -211,7 +211,12 @@ static u32 sc_lookup(u32 a,u32 b,u32 p)
 	}
 	if(sc_budget<=0) return 0;      // out of frame budget: caller retries
 	c=sc_alloc_cell();
-	if(c>=MAX_TILES) return BLANK_TILE;
+	if(c>=MAX_TILES) return 0;      // cache full: RETRY too - hidden rows
+	                                // age past the eviction threshold in
+	                                // <=16 frames and space appears. (A
+	                                // permanent BLANK here left menus
+	                                // stably glitched: rows completed
+	                                // with blanks and never rebuilt.)
 	sc_budget--;
 	sc_convert_cell(XGB_VRAM+a*16, XGB_VRAM+b*16, p, sc_cell_vram(c));
 	sc_cell_key[c]=key; sc_cell_gen[c]=sc_gen;
@@ -448,7 +453,7 @@ void scaling_scaled_frame(void)
 	wmap   = XGB_VRAM + ((lcdc&0x40) ? 0x1C00 : 0x1800);
 	wdirty = dirty_map_words + ((lcdc&0x40) ? 32 : 0);
 	blank = BLANK_TILE | (BG_PAL<<12);
-	if(((lcdc ^ sc_last_lcdc) & 0x78) || windowY != sc_last_wy)
+	if(((lcdc ^ sc_last_lcdc) & 0x78) || (windowY>>3) != (sc_last_wy>>3))
 	{
 		int i;
 		vu16 *m=WIN_MAP;
