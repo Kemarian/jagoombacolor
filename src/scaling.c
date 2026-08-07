@@ -315,14 +315,24 @@ void scaling_scaled_frame(void)
 	u16 dispcnt;
 
 	if(sc_busy)
-	{	// mid-build reentry: skip cache work but KEEP the display coherent
-		// (re-arm the VOFS DMA from existing tables; a frame without it
-		// shows vertically-unscaled content = visible full-frame jump)
+	{	// mid-build reentry: skip cache work but KEEP the display coherent.
+		// BOTH VOFS DMAs must be disabled+re-armed (disable first: the
+		// source only re-latches on a 0->1 enable) - v18 bug: only DMA0
+		// was handled here, so busy frames fed BG1 (window layer) from a
+		// marching stale source = glitching HUD/menu bar.
 		*(vu16*)0x40000BA = 0;
 		*(vu32*)0x40000B0 = (u32)&sc_vtab0[1];
 		*(vu32*)0x40000B4 = 0x04000012;
 		*(vu32*)0x40000B8 = 159 | (0xA240u<<16);
 		*(vu16*)0x4000012 = sc_vtab0[0];
+		*(vu16*)0x40000C6 = 0;
+		if((lcdctrl0frame_&0x20) && windowY<144 && windowX<8)
+		{
+			*(vu32*)0x40000BC = (u32)&sc_vtab1[1];
+			*(vu32*)0x40000C0 = 0x04000016;
+			*(vu32*)0x40000C4 = 159 | (0xA240u<<16);
+			*(vu16*)0x4000016 = sc_vtab1[0];
+		}
 		return;
 	}
 	sc_busy=1;
