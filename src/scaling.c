@@ -485,9 +485,12 @@ void scaling_scaled_frame(void)
 		{	// valid: rotate eviction stamps (1/8 of rows per frame)
 			if(((mr^sc_gen)&7)==0)
 				for(j=0;j<ncontent;j++) sc_stamp_slot(mr,C0+j);
-			sc_row_c0[mr]=st;
 			continue;
 		}
+		// rebuilding: the row's OLD cells are still on screen this frame -
+		// stamp them every frame or a slow convergence gets its displayed
+		// cells evicted underneath it (menu-churn garbage loop)
+		for(j=0;j<ncontent;j++) sc_stamp_slot(mr,C0+j);
 		mrow = gbmap + mr*32;
 		if(st==(u16)(C0-1) || st==(u16)(C0+1))
 		{	// panning: build only the entering column
@@ -535,6 +538,13 @@ void scaling_scaled_frame(void)
 			else
 			{
 				int complete=1;
+				// displayed old cells must survive the convergence
+				for(j=0;j<wcols;j++)
+				{
+					u32 t=out[j]&0x3FF;
+					if(t>=TILE_BASE && t<TILE_BASE+MAX_TILES)
+						sc_cell_gen[t-TILE_BASE]=sc_gen;
+				}
 				for(j=0;j<wcols;j++)
 				{
 					u16 e = sc_cell_entry(mrow,j,mode8000,ccols);
