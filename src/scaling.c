@@ -376,7 +376,6 @@ void scaling_scaled_frame(void)
 		return;
 	}
 	sc_busy=1;
-	*(vu16*)0x05000000 = 0x001F;   // TIMING DEBUG: red while building
 
 	// ---- PHASE A: display programming, guaranteed early ----
 	fit = (g_scale_mode==SCALE_FIT);
@@ -624,7 +623,7 @@ void scaling_scaled_frame(void)
 		}
 	}
 
-	*(vu16*)0x05000000 = 0;        // TIMING DEBUG: work done -> black
+	*(vu16*)0x05000000 = 0;        // backdrop black (borders)
 	sc_busy=0;
 }
 
@@ -636,7 +635,6 @@ void scaling_fix_oam(void)
 	vu16 *oam=(vu16*)0x07000000;
 	int i;
 	int ysh = (lcdctrl0frame_ & 0x04) ? 8 : 4;
-	*(vu16*)0x05000000 = 0x03E0;   // TIMING DEBUG: green during OAM pass
 	int fit = (g_scale_mode==SCALE_FIT);
 	u16 pa = fit ? 227 : 170;                  // 256*8/9 / 256*2/3
 	u16 pd = 227;                              // v29: was 230 (256*9/10).
