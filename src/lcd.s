@@ -346,10 +346,10 @@ GFX_reset:	@called with CPU reset
 	@get GBC palette (auto-detect) - only for new games without saved config
 	ldr_ r0,memmap_tbl
 	blx_long GetGbcPaletteNumber
-	@if zero, pick the dbg default: Metroid (hue-separated layers for
-	@GIF forensics; was 1 = greyscale)
+	@if zero, pick greyscale (dbg builds: use 5 = Metroid for
+	@hue-separated layer forensics)
 	cmp r0,#0
-	moveq r0,#5
+	moveq r0,#01
 	ldr r1,=palettebank
 	strb r0,[r1]
 0:
@@ -5146,9 +5146,7 @@ _vblank_happened:
 _gb_oam_buffer_screen:	.word GBOAMBUFF1		@finished OAM buffer for the screen
 _gb_oam_buffer_writing:	.word GBOAMBUFF2		@OAM buffer we are writing to
 
-palettebank:	.word 5			@_palettebank - dbg default: Metroid
-								@(red cat / blue monsters / yellow BG =
-								@hue-separable layers for GIF forensics)
+palettebank:	.word 1			@_palettebank (dbg: 5 = Metroid)
 	.word 0 @unused, was bg_cache_cursor
 	.word 0 @unused, was bg_cache_base
 	.word 0 @unused, was bg_cache_limit
