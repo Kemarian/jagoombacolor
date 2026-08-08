@@ -388,3 +388,30 @@ around the call. (b) WIN1 clips fit-mode content to x=30..209 (cells are
 opaque 1..4; 24-cell viewport is wider than 180px), WINOUT=BG3 keeps the
 border layer. Left as known: 8px window quantization (P3 WIN0-split),
 sub-tile wy loss (<=7px), budget/overrun economics (P3 IWRAM converter).
+
+## v29 (2026-08-08) - sub-tile window seating + OBJ seam fix
+
+v28 forensics verdict (two fable agents, 4 GIFs): THE DMA FIX WORKED -
+settled menu bit-exact (SAD 0.00/row, true 10/9 both layers, zero broken
+glyphs), zero red content scanlines, WIN1 clip exact (x=30..209, 149/149),
+menu open 2.8x -> 1.6x slower, OAM-at-vblank-start invisible (0 green).
+Two defects remained, both now root-caused:
+
+1. WINDOW TILE QUANTIZATION: wtop=WY>>3 floor-seats the window - ROUND
+   bar (WY=135) 7 rows high with its tilemap row 1 (white body) filling
+   rows 152-159 = "the white bar"; menu (WY=92) 4 rows high. v29: WY&7
+   baked into sc_vtab1 (per-line VOFS absorbs the remainder); window now
+   seats at ceil(WY*10/9) exactly. wsub is undebounced (<=7px lead for
+   <=3 frames during slides; exact at rest).
+2. OBJ SEAM: stacked 8px sprite units sit 9px apart after 10/9 rounding
+   but PD=230 painted 8.90px/unit -> 1px background gap severing the cat
+   (row 91 standing, 89 pushing; pose-dependent = "some positions").
+   v29: PD=227 paints 9.02px (round-down-to-overlap, same rule as PA).
+
+Also: dbg palette baked = Metroid (auto-detect fallback in GFX_reset, not
+just the palettebank default - the GBC table fallback overwrote it) for
+hue-separable layers in future captures. Known remaining: menu slide 8px
+steps + 1.6x cadence (P3 WIN0-split + budget), open/close erase-draw
+ordering (5f dropout / 2f doubling), feet 1-2px low (recheck after PD
+change), speed unmeasured in v28 GIFs (5.03x timebase mismatch between
+captures - re-capture with identical recorder settings).
