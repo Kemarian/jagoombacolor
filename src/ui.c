@@ -104,6 +104,7 @@ autodetect_speedhack,
 gbtype,changeautoborder,gbatype};
 static void changescale(void);
 u8 g_scale_mode=0;
+u8 g_restore_pending=0;	//v28: toggle-off rebuild deferred to newframe_vblank
 const fptr fnlist3[]={chpalette,brightset,sgbpalnum,changescale};
 
 const fptr fnlist4[]={
@@ -328,7 +329,7 @@ char *const brightxt[]={"I","II","III","IIII","IIIII"};
 char *const hostname[]={"Crap","Prot","GBA","GBP","NDS"};
 char *const ctrltxt[]={"1P","2P","Link2P","Link3P","Link4P"};
 char *const bordtxt[]={"Black","Grey","Blue","None"};
-char *const scaletxt[]={"Off","Fit v27dbg","Stretch v27dbg"};
+char *const scaletxt[]={"Off","Fit v28dbg","Stretch v28dbg"};
 char *const paltxt[]=
 {
 "Pea Soup",
@@ -800,18 +801,20 @@ void changescale()
 	g_scale_mode=(g_scale_mode+1)%SCALE_MODES;
 	if(g_scale_mode==SCALE_1X)
 	{
-		//v27: ATOMIC toggle-off. Without this, a vblank landing between
-		//the mode flip and the queue-clears inside scaling_restore runs
-		//the normal path against stale state (residual S2 font damage).
 		u16 ime=*(vu16*)0x4000208;
 		*(vu16*)0x4000208=0;
 		//stop Stretch-mode VOFS DMAs before normal mode re-arms its own
 		*(vu16*)0x40000BA=0; *(vu16*)0x40000C6=0; *(vu16*)0x40000D2=0;
-		scaling_restore();	//rebuild anything scaled mode clobbered in VRAM
+		//v28: DEFER the rebuild to the first emulated frame after the UI
+		//exits (newframe_vblank consumes the flag). Rebuilding here (v27)
+		//still left fonts broken - state was re-touched between this call
+		//and game resume; after resume nothing runs ahead of the rebuild.
+		g_restore_pending=1;
 		*(vu16*)0x4000208=ime;
 	}
 	else
 	{
+		g_restore_pending=0;	//entering scaled mode supersedes a pending rebuild
 		scaling_enter();	//reset the pair cache
 		scaling_scaled_frame();	//build cache+map now, while game is paused
 	}
