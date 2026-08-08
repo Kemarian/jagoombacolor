@@ -440,3 +440,22 @@ tuning/IWRAM converter; open/close erase-draw ordering (5f bar dropout /
 2f doubling); feet seat 1-2px low (recheck after PD change); speed
 re-measure with identical recorder settings; CGB colorization of scaled
 mode still unaddressed (DMG-only engine).
+
+## v29 verification (2026-08-08, Metroid-palette captures)
+
+Geometry DONE, measured exact: every window row at ceil(WY*10/9) with
+delta 0 (bar text 152-158, menu panel top 103, SCROLL/RESTART/EXIT all
+exact); settled menu a pixel-EXACT 9/8x10/9 resample (SAD=0, unique
+phase); cat seam gone in all 51 visible frames, feet in exact floor
+contact, height 26 rows = 23*256/227; ZERO wrong-hue patches, zero
+in-band red, zero dead scanlines. SPEED RECOVERED: settled gameplay
+matches orig (monster toggle 26 vs 27 frames, consistent timebases) -
+v28's "5x" was capture-side, and the v27 22% tax is gone with the DMA
+count fix.
+
+Remaining (all one subsystem - window-layer transition pipelining):
+displayed slides 1.64x slower with a 2-generation ~5px oscillation;
+ghost bars 3-4f after the GB window is gone; 8f bar-return dropout;
+5f stale lead-row text; NEW close-start overshoot ~5px/3f = undebounced
+wsub leading debounced wtop on WY reversal (the documented trade-off,
+now measured). All queued under the P3 WIN0-split window rework.
