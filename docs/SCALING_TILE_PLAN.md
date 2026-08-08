@@ -331,3 +331,30 @@ v21 restructure:
    lines of vblank ALWAYS; map/VRAM updates may trickle after (cells keep
    old content until replaced - mid-scan cell swap is a 1-line-late detail,
    not a torn frame).
+
+## v26 synthesis (2026-08-08) - from ANALYSIS_REPORT_GPT-5.6-SOL + claude-fable-5
+
+Consensus root cause (S1+S2+S3): the tile pipeline's PRODUCER half runs
+unowned in scaled mode. newframe_vblank (GB line 144, non-IRQ, no mode
+check) store_recent_tiles STEALS DIRTY_TILE_BITS (scaler invalidation
+starved; only the overflow fallback ever fed it) and flush_recent_tiles
+renders normal tiles into 0x8000-0xBFFF = live cell cache, mid-scanout.
+S2 = stale RECENT_TILES replay after restore (consume_buffer still set;
+restore's walk interleaves with the replay -> half-corrupted glyphs);
+restore's VRAM coverage itself verified complete by both analysts.
+
+Adopted unique finds: sentinel collision (C0==0 -> (u16)(C0-1)==0xFFFF
+invalid marker -> misclassified pan); budget-exhausted dirty rows don't
+persist invalidation; window wipe-on-change guarantees blank frames during
+slides (fix: stale-until-replaced, like BG rows); S4 likely content not
+timing (which line doubles moves with scrollY - A/B test); S5 = sprite
+priority (window BG1 prio2 ties OBJ prio2, BG wins -> sprites sink behind
+menu; remap normal sprites to prio1) + possibly per-line OBJ cycle budget
+(double-size affine ~5x cost). Rejected: GPT's bank1-OBJ-skip claim (dirty
+bits are address-based, both banks converted); GFX_reset-level restore.
+Upstream bug noted: AfterLoadState clears vram_packets with outdated sizes.
+
+v26 batch: P0 producer gating + restore queue-clears + sweep-restart +
+sentinel/persist fixes; P1 wipe-kill; P2 sprite prio remap (+WIN1 clip
+later). P3 (after retest): WIN0-split window model replacing debounce;
+IWRAM ARM converter + EWRAM gen-shadow + timer budget; S4 A/B.
