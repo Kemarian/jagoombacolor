@@ -328,7 +328,7 @@ char *const brightxt[]={"I","II","III","IIII","IIIII"};
 char *const hostname[]={"Crap","Prot","GBA","GBP","NDS"};
 char *const ctrltxt[]={"1P","2P","Link2P","Link3P","Link4P"};
 char *const bordtxt[]={"Black","Grey","Blue","None"};
-char *const scaletxt[]={"Off","Fit v26dbg","Stretch v26dbg"};
+char *const scaletxt[]={"Off","Fit v27dbg","Stretch v27dbg"};
 char *const paltxt[]=
 {
 "Pea Soup",
@@ -800,9 +800,15 @@ void changescale()
 	g_scale_mode=(g_scale_mode+1)%SCALE_MODES;
 	if(g_scale_mode==SCALE_1X)
 	{
+		//v27: ATOMIC toggle-off. Without this, a vblank landing between
+		//the mode flip and the queue-clears inside scaling_restore runs
+		//the normal path against stale state (residual S2 font damage).
+		u16 ime=*(vu16*)0x4000208;
+		*(vu16*)0x4000208=0;
 		//stop Stretch-mode VOFS DMAs before normal mode re-arms its own
 		*(vu16*)0x40000BA=0; *(vu16*)0x40000C6=0; *(vu16*)0x40000D2=0;
 		scaling_restore();	//rebuild anything scaled mode clobbered in VRAM
+		*(vu16*)0x4000208=ime;
 	}
 	else
 	{
