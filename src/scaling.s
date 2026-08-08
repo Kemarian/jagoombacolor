@@ -27,6 +27,28 @@ scaling_restore:
 	stmfd sp!,{r3-r11,lr}
 	ldr r10,=GLOBAL_PTR_BASE
 
+	@v26: clear deferred queues FIRST - a stale RECENT_TILES snapshot (or
+	@packet list) consumed after the rebuild would replay old tile data
+	@over it with no pending invalidation = permanent corruption (S2)
+	mov r0,#0
+	strb_ r0,consume_buffer
+	strb_ r0,consume_dirty
+	ldr r1,=RECENT_TILENUM
+	str r0,[r1]
+	mov r1,#0
+	ldr r0,=vram_packets_incoming
+	mov r2,#0xC0
+	bl_long memset32_
+	ldr r0,=vram_packets_registered_bank0
+	mov r2,#0xC0
+	bl_long memset32_
+	ldr r0,=vram_packets_registered_bank1
+	mov r2,#0xC0
+	bl_long memset32_
+	ldr r0,=vram_packets_dirty
+	mov r2,#0xC4
+	bl_long memset32_
+
 	@make VRAM all dirty
 	mov r1,#0xFFFFFFFF
 	ldr r0,=DIRTY_TILE_BITS
