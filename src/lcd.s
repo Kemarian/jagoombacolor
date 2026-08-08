@@ -346,9 +346,10 @@ GFX_reset:	@called with CPU reset
 	@get GBC palette (auto-detect) - only for new games without saved config
 	ldr_ r0,memmap_tbl
 	blx_long GetGbcPaletteNumber
-	@if zero, pick greyscale
+	@if zero, pick the dbg default: Metroid (hue-separated layers for
+	@GIF forensics; was 1 = greyscale)
 	cmp r0,#0
-	moveq r0,#01
+	moveq r0,#5
 	ldr r1,=palettebank
 	strb r0,[r1]
 0:
