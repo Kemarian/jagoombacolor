@@ -68,6 +68,8 @@ EWRAM_BSS static u16 sc_row_c0[32]; // per BG row: C0 the row was built for
                                     // only entering columns get built.
 static u16 sc_ncells, sc_tombs, sc_evict_ptr;
 static int sc_last_scy=-1;
+static u8 sc_wsub;                  // v29: window sub-tile Y (WY&7) baked
+                                    // into sc_vtab1; rebuild on change
 static u8 sc_gen, sc_tables_ok, sc_active, sc_last_lcdc, sc_last_wy;
 static u8 sc_N, sc_D;               // current ratio (9/8 or 3/2)
 static volatile u8 sc_busy;         // menu-sync vs vblank reentry guard
@@ -406,15 +408,25 @@ void scaling_scaled_frame(void)
 		wtop = sc_wst_cur & 0x1F;
 	}
 
-	if(scy != sc_last_scy)
-	{
-		int y;
-		for(y=0;y<161;y++)
+	{	// v29: sub-tile window seating. The window map row is tile-
+		// quantized (wtop=WY>>3), which parked the ROUND bar 7 rows high
+		// (WY=135) with its tilemap row 1 (white panel body) visible below
+		// = the "white bar". The per-line VOFS stream absorbs the
+		// remainder: shifting vtab1 by WY&7 seats the window exactly.
+		// (wsub is undebounced - during slides it may lead wtop by <=7px
+		// for the 3 debounce frames; exact at rest, which is what shows.)
+		int wsub = wenable ? (windowY&7) : 0;
+		if(scy != sc_last_scy || wsub != sc_wsub)
 		{
-			sc_vtab0[y] = (u16)((scy - sc_vdelta[y]) & 0xFF);
-			sc_vtab1[y] = (u16)((0   - sc_vdelta[y]) & 0xFF);
+			int y;
+			for(y=0;y<161;y++)
+			{
+				sc_vtab0[y] = (u16)((scy - sc_vdelta[y]) & 0xFF);
+				sc_vtab1[y] = (u16)((0   - sc_vdelta[y] - wsub) & 0xFF);
+			}
+			sc_last_scy = scy;
+			sc_wsub = (u8)wsub;
 		}
-		sc_last_scy = scy;
 	}
 
 	REG_BG0CNT = 3 | (1<<2) | (10<<8) | (1<<14);            // 64x32 ring
@@ -627,7 +639,12 @@ void scaling_fix_oam(void)
 	*(vu16*)0x05000000 = 0x03E0;   // TIMING DEBUG: green during OAM pass
 	int fit = (g_scale_mode==SCALE_FIT);
 	u16 pa = fit ? 227 : 170;                  // 256*8/9 / 256*2/3
-	u16 pd = 230;                              // 256*9/10 (both modes)
+	u16 pd = 227;                              // v29: was 230 (256*9/10).
+	// Stacked 8px OBJ units sit 9px apart after 10/9 rounding, but PD=230
+	// painted only 8.90px of content per unit -> 1px background seam
+	// severing tall sprites at some Y phases. 227 paints 9.02px (same
+	// round-down-to-overlap rule as PA); the ~1.3% extra height is
+	// invisible, the seam is not.
 	int xb = fit ? 30 : 0;                     // left border offset
 
 	oam[3]=pa;        oam[7]=0;  oam[11]=0; oam[15]=pd;
