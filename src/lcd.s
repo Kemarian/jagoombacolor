@@ -1639,16 +1639,33 @@ canary_value_doesnt_match:
 0:
 	mov r0,#1
 	strb_ r0,vblank_happened
-	
-	bl display_frame
 
 	@scaled mode: skip tile-consume/HDMA work, scaling.c drives the display.
 	@consume_* must not run: they write the 0x8000 VRAM region = pair cache.
-	@Sprites still render; scaling_fix_oam rewrites them as affine 1.5x.
+	@v28: OAM pass runs FIRST - the builder (display_frame ->
+	@scaling_scaled_frame) can eat most of vblank, and an OAM pass that
+	@slides past line 227 tears whichever sprites the beam is scanning
+	@(v27's "after the builder" order split sprites at beam-adjacent rows)
 	ldr r12,=g_scale_mode
 	ldrb r12,[r12]
 	tst r12,r12
-	bne 8f
+	beq 6f
+
+	@v27: if we're already in active display (the builder overran and a
+	@nested vblank handled sprites at the proper time), skip - OAM writes
+	@mid-scanout scatter the sprites for a frame
+	mov r0,#REG_BASE
+	ldrh r0,[r0,#6]		@REG_VCOUNT
+	cmp r0,#160
+	blo 5f
+	bl display_sprites
+	blx_long scaling_fix_oam
+5:
+	bl display_frame
+	b 7f
+
+6:	@---- normal mode ----
+	bl display_frame
 
 	bl display_sprites
 	bl consume_recent_tiles
@@ -1657,17 +1674,6 @@ canary_value_doesnt_match:
 
 	ldr r0,=do_gba_hdma
 	str r0,vcountfptr
-	b 7f
-8:
-	@v27: if we're already in active display (the builder overran and a
-	@nested vblank handled sprites at the proper time), skip - OAM writes
-	@mid-scanout scatter the sprites for a frame
-	mov r0,#REG_BASE
-	ldrh r0,[r0,#6]		@REG_VCOUNT
-	cmp r0,#160
-	blo 7f
-	bl display_sprites
-	blx_long scaling_fix_oam
 7:
 	bl_long showfps_
 
