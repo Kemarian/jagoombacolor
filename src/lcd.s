@@ -1659,6 +1659,13 @@ canary_value_doesnt_match:
 	str r0,vcountfptr
 	b 7f
 8:
+	@v27: if we're already in active display (the builder overran and a
+	@nested vblank handled sprites at the proper time), skip - OAM writes
+	@mid-scanout scatter the sprites for a frame
+	mov r0,#REG_BASE
+	ldrh r0,[r0,#6]		@REG_VCOUNT
+	cmp r0,#160
+	blo 7f
 	bl display_sprites
 	blx_long scaling_fix_oam
 7:

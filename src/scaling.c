@@ -363,6 +363,14 @@ void scaling_scaled_frame(void)
 			*(vu32*)0x40000C4 = 159 | (0xA240u<<16);
 			*(vu16*)0x4000016 = sc_vtab1[0];
 		}
+		{	// v27: keep OUR palette in force - transfer_palette_ ran just
+			// before us with gamma values; skipping this write made every
+			// busy frame flash gamma-gray
+			vu16 *pal=(vu16*)0x05000100;
+			u16 *src=(u16*)gbc_palette;
+			pal[1]=src[0]; pal[2]=src[1]; pal[3]=src[2]; pal[4]=src[3];
+			*(vu16*)0x05000000 = 0;
+		}
 		return;
 	}
 	sc_busy=1;
