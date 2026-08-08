@@ -1141,6 +1141,11 @@ render_tiles_3_loop:
 
 store_dirty_packets:
 	stmfd sp!,{r3,r4,lr}
+	@scaled mode owns the dirty pipeline (v26)
+	ldr r0,=g_scale_mode
+	ldrb r0,[r0]
+	movs r0,r0
+	ldmnefd sp!,{r3,r4,pc}
 	ldrb_ r0,consume_buffer
 	movs r0,r0
 	blne flush_recent_tiles
@@ -2777,10 +2782,16 @@ upload_sprites_early:
 	str_ r0,gb_oam_buffer_writing
 	
 	stmfd sp!,{r0,r1,r12,lr}
+	@scaled mode owns the dirty pipeline (see newframe_vblank gate)
+	ldr r0,=g_scale_mode
+	ldrb r0,[r0]
+	movs r0,r0
+	bne 3f
 	bl flush_recent_tiles   @preserves registers
 	bl_long store_recent_tiles
 	mov r0,#2
 	strb_ r0,consume_buffer
+3:
 	ldmfd sp!,{r0,r1,r12,lr}
 	b_long after_upload_sprites_early
 .popsection
@@ -3298,6 +3309,14 @@ gb_oam_is_clean:
 	streqb_ r0,consume_dirty
 	beq after_wait
 	
+	@scaled mode owns the dirty pipeline: do not capture/flush here.
+	@(store_recent_tiles would steal DIRTY_TILE_BITS from the scaler and
+	@flush_recent_tiles would render into the scaled cell cache - v26)
+	ldr r0,=g_scale_mode
+	ldrb r0,[r0]
+	movs r0,r0
+	bne 1f
+
 	ldrb_ r0,consume_buffer
 	cmp r0,#2
 	@2: stored earlier in frame, allow it to be consumed now
@@ -3305,7 +3324,7 @@ gb_oam_is_clean:
 	beq 2f
 	movs r0,r0
 	blne_long flush_recent_tiles
-	
+
 	bl_long store_recent_tiles
 2:
 	mov r0,#1

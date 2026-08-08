@@ -253,16 +253,12 @@ static void sc_update_dirty(void)
 		if(d) { sc_dirty_snap[i]|=d; acc|=d; DIRTY_TILE_BITS[i]=0; }
 	}
 	if(acc)
-	{
+	{	// v26: RESTART the sweep on any merge - a one-shot write landing
+		// behind an active sweep's cursor was silently lost until eviction
 		VRAM_chr_lastAddr=0xFF;
-		if(!sc_sweep_active)
-		{	// start a sweep only if none is running; an active sweep just
-			// absorbs the merged bits (tiles it already passed re-dirty
-			// DIRTY_TILE_BITS on the next write and get the next sweep)
-			sc_sweep_active=1;
-			sc_sweep_obj=0;
-			sc_sweep_cell=0;
-		}
+		sc_sweep_active=1;
+		sc_sweep_obj=0;
+		sc_sweep_cell=0;
 	}
 	if(!sc_sweep_active) return;
 
@@ -484,10 +480,13 @@ void scaling_scaled_frame(void)
 	wdirty = sc_mapdirty + ((lcdc&0x40) ? 32 : 0);
 	blank = BLANK_TILE | (BG_PAL<<12);
 	if(((lcdc ^ sc_last_lcdc) & 0x58) || sc_wst_cur != sc_last_wy)
-	{
-		int i;
+	{	// v26: NO full wipe on window change - the old entries stay
+		// displayed until each row's replacement is built (same rule as
+		// BG rows). Only rows ABOVE the new window top get blanked (they
+		// left the window and must be transparent).
+		int i, lim = wenable ? wtop : 18;
 		vu16 *m=WIN_MAP;
-		for(i=0;i<0x400;i++) m[i]=blank;
+		for(i=0;i<lim*32;i++) m[i]=blank;
 		for(i=0;i<18;i++) sc_wbuilt[i]=0;
 		// BG rows hidden behind the window aren't stamped and may have
 		// been evicted: force rebuild when the window layout changes
@@ -511,7 +510,9 @@ void scaling_scaled_frame(void)
 		u16 st;
 		if(wenable && r>wtop+1) continue;
 		st = sc_row_c0[mr];
-		if(mdirty[mr]) st=0xFFFF;
+		if(mdirty[mr]) { st=0xFFFF; sc_row_c0[mr]=0xFFFF; }
+		// (persist the invalidation NOW: if the rebuild below runs out of
+		// budget, the row must stay invalid for next frame - v26)
 		if(st==(u16)C0)
 		{	// valid: rotate eviction stamps (1/8 of rows per frame)
 			if(((mr^sc_gen)&7)==0)
@@ -523,7 +524,9 @@ void scaling_scaled_frame(void)
 		// cells evicted underneath it (menu-churn garbage loop)
 		for(j=0;j<ncontent;j++) sc_stamp_slot(mr,C0+j);
 		mrow = gbmap + mr*32;
-		if(st==(u16)(C0-1) || st==(u16)(C0+1))
+		if(st!=0xFFFF && (st==(u16)(C0-1) || st==(u16)(C0+1)))
+		// (st==0xFFFF must never classify as a pan: at C0==0 the invalid
+		// sentinel equals (u16)(C0-1) - v26 sentinel-collision fix)
 		{	// panning: build only the entering column
 			int A = (st==(u16)(C0-1)) ? C0+ncontent-1 : C0;
 			u16 e = sc_cell_entry(mrow,A,mode8000,ccols);
@@ -627,6 +630,13 @@ void scaling_fix_oam(void)
 		a0 = (a0 & 0xFC00) | 0x0300 | (y & 0xFF);
 		oam[i*4]   = a0;
 		oam[i*4+1] = a1;
+		{	// v26: normal sprites (GBA prio 2 from display_sprites) must
+			// beat the window layer (BG1 prio 2; BG wins ties on GBA) -
+			// remap to prio 1. "Behind BG" sprites (prio 3) stay.
+			u16 a2=oam[i*4+2];
+			if((a2&0x0C00)==0x0800)
+				oam[i*4+2]=(u16)((a2&~0x0C00)|0x0400);
+		}
 	}
 	*(vu16*)0x05000000 = 0;        // TIMING DEBUG: all vblank work done
 }
