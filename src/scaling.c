@@ -51,6 +51,11 @@ EWRAM_BSS static u8  sc_cell_gen[MAX_TILES];
 EWRAM_BSS static u32 sc_nib[256];
 EWRAM_BSS static u16 sc_wbuilt[18];
 EWRAM_BSS static u32 sc_dirty_snap[12];
+EWRAM_BSS static u8  sc_mapdirty[64];   // per-frame snapshot of the map
+                                        // dirty bytes: BG and window may
+                                        // share a tilemap, so consuming
+                                        // dirty_map_words directly lets
+                                        // one loop wipe the other's signal
 EWRAM_BSS static u8  sc_srcsel[9][8];   // per phase: source nibble 0..15
 EWRAM_BSS static u8  sc_vdelta[161];
 EWRAM_BSS static u16 sc_vtab0[161];
@@ -464,9 +469,19 @@ void scaling_scaled_frame(void)
 
 	gbmap  = XGB_VRAM + ((lcdc&0x08) ? 0x1C00 : 0x1800);
 	mode8000 = lcdc&0x10;
-	mdirty = dirty_map_words + ((lcdc&0x08) ? 32 : 0);
+	{	// snapshot + clear the map dirty bytes once per frame; both the
+		// BG and window loops read the snapshot (may be the same map!)
+		int i;
+		for(i=0;i<64;i++)
+		{
+			u8 d=dirty_map_words[i];
+			sc_mapdirty[i]=d;
+			if(d) dirty_map_words[i]=0;
+		}
+	}
+	mdirty = sc_mapdirty + ((lcdc&0x08) ? 32 : 0);
 	wmap   = XGB_VRAM + ((lcdc&0x40) ? 0x1C00 : 0x1800);
-	wdirty = dirty_map_words + ((lcdc&0x40) ? 32 : 0);
+	wdirty = sc_mapdirty + ((lcdc&0x40) ? 32 : 0);
 	blank = BLANK_TILE | (BG_PAL<<12);
 	if(((lcdc ^ sc_last_lcdc) & 0x58) || sc_wst_cur != sc_last_wy)
 	{
@@ -496,7 +511,7 @@ void scaling_scaled_frame(void)
 		u16 st;
 		if(wenable && r>wtop+1) continue;
 		st = sc_row_c0[mr];
-		if(mdirty[mr]) { mdirty[mr]=0; st=0xFFFF; }
+		if(mdirty[mr]) st=0xFFFF;
 		if(st==(u16)C0)
 		{	// valid: rotate eviction stamps (1/8 of rows per frame)
 			if(((mr^sc_gen)&7)==0)
@@ -540,7 +555,7 @@ void scaling_scaled_frame(void)
 			int wr=r-wtop;
 			const u8 *mrow = wmap + wr*32;
 			vu16 *out = WIN_MAP + r*32;
-			if(wdirty[wr]) { wdirty[wr]=0; sc_wbuilt[r]=0; }
+			if(wdirty[wr]) sc_wbuilt[r]=0;
 			if(sc_wbuilt[r])
 			{
 				if(((r^sc_gen)&7)==0)

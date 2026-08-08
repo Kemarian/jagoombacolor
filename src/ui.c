@@ -328,7 +328,7 @@ char *const brightxt[]={"I","II","III","IIII","IIIII"};
 char *const hostname[]={"Crap","Prot","GBA","GBP","NDS"};
 char *const ctrltxt[]={"1P","2P","Link2P","Link3P","Link4P"};
 char *const bordtxt[]={"Black","Grey","Blue","None"};
-char *const scaletxt[]={"Off","Fit v24dbg","Stretch v24dbg"};
+char *const scaletxt[]={"Off","Fit v25dbg","Stretch v25dbg"};
 char *const paltxt[]=
 {
 "Pea Soup",
