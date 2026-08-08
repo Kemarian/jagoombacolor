@@ -5145,7 +5145,9 @@ _vblank_happened:
 _gb_oam_buffer_screen:	.word GBOAMBUFF1		@finished OAM buffer for the screen
 _gb_oam_buffer_writing:	.word GBOAMBUFF2		@OAM buffer we are writing to
 
-palettebank:	.word 1			@_palettebank
+palettebank:	.word 5			@_palettebank - dbg default: Metroid
+								@(red cat / blue monsters / yellow BG =
+								@hue-separable layers for GIF forensics)
 	.word 0 @unused, was bg_cache_cursor
 	.word 0 @unused, was bg_cache_base
 	.word 0 @unused, was bg_cache_limit
