@@ -3324,6 +3324,27 @@ gb_oam_is_clean:
 	movs r0,r0
 	bne 1f
 
+	@v28: deferred toggle-off rebuild. Runs on the first emulated frame
+	@after the UI exits, with IRQs masked so the vblank handler cannot
+	@consume the all-dirty state mid-rebuild.
+	ldr r0,=g_restore_pending
+	ldrb r1,[r0]
+	movs r1,r1
+	beq 5f
+	stmfd sp!,{r1,r2,r12,lr}
+	mov r1,#0
+	strb r1,[r0]
+	mov r0,#0x04000000
+	orr r0,r0,#0x208
+	ldrh r2,[r0]
+	mov r1,#0
+	strh r1,[r0]
+	stmfd sp!,{r0,r2}
+	bl_long scaling_restore
+	ldmfd sp!,{r0,r2}
+	strh r2,[r0]
+	ldmfd sp!,{r1,r2,r12,lr}
+5:
 	ldrb_ r0,consume_buffer
 	cmp r0,#2
 	@2: stored earlier in frame, allow it to be consumed now

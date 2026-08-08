@@ -358,3 +358,33 @@ v26 batch: P0 producer gating + restore queue-clears + sweep-restart +
 sentinel/persist fixes; P1 wipe-kill; P2 sprite prio remap (+WIN1 clip
 later). P3 (after retest): WIN0-split window model replacing debounce;
 IWRAM ARM converter + EWRAM gen-shadow + timer budget; S4 A/B.
+
+## v28 (2026-08-08) - THE DMA COUNT BUG + deferred restore + WIN1 clip
+
+GIF forensics on v27 (two fable agents, 4 captures frameskip 0) measured:
+window/text block vertically UNstretched (slope exactly 1.0, constant
+offset), BG stretched only piecewise (89 consecutive rows at g=y-8, bands
+with different phases), screen-fixed dead scanlines showing backdrop
+(y=1,5,6,11,23,34...), status bar 15 rows up + garbage rows 152-159, game
+logic 22% slow (timer 123fr/s vs 100, blink 32.8 vs 26.9), builder overrun
+every enemy blink (~33fr), content bleeding 3px/9px into borders, menu
+open 2.8x slower with 8px/17fr jerky window steps.
+
+ROOT CAUSE (explains ALL of the above): HBlank VOFS DMA armed with
+count=159. A repeat-HBlank DMA transfers its WHOLE count every hblank
+(count reloads, source keeps advancing) - we sprayed 159 halfwords into
+BG0VOFS/BG1VOFS per line, the source walked ~51KB of EWRAM per frame, and
+each line's VOFS became whatever the walk ended on: piecewise-constant
+slopes of 1.0 (constant EWRAM regions), dead lines (values pointing at
+blank map rows), and a massive DMA bus tax (the 22% slowdown + overrun
+sensitivity). Normal mode's own stream (count=6 = 6 regs/line, dest-
+reload) was the miscopied template. Fix: count=1 at all 4 arm sites.
+
+Also v28: (a) toggle-off restore DEFERRED to first newframe_vblank after
+UI exit (g_restore_pending; changescale only stops DMAs) - v27's in-UI
+restore still produced broken fonts despite verified-complete VRAM
+coverage, so the rebuild now runs when nothing can follow it; IME masked
+around the call. (b) WIN1 clips fit-mode content to x=30..209 (cells are
+opaque 1..4; 24-cell viewport is wider than 180px), WINOUT=BG3 keeps the
+border layer. Left as known: 8px window quantization (P3 WIN0-split),
+sub-tile wy loss (<=7px), budget/overrun economics (P3 IWRAM converter).

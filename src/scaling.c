@@ -353,14 +353,14 @@ void scaling_scaled_frame(void)
 		*(vu16*)0x40000BA = 0;
 		*(vu32*)0x40000B0 = (u32)&sc_vtab0[1];
 		*(vu32*)0x40000B4 = 0x04000012;
-		*(vu32*)0x40000B8 = 159 | (0xA240u<<16);
+		*(vu32*)0x40000B8 = 1 | (0xA240u<<16);
 		*(vu16*)0x4000012 = sc_vtab0[0];
 		*(vu16*)0x40000C6 = 0;
 		if(sc_wst_cur>>7)   // debounced window state
 		{
 			*(vu32*)0x40000BC = (u32)&sc_vtab1[1];
 			*(vu32*)0x40000C0 = 0x04000016;
-			*(vu32*)0x40000C4 = 159 | (0xA240u<<16);
+			*(vu32*)0x40000C4 = 1 | (0xA240u<<16);
 			*(vu16*)0x4000016 = sc_vtab1[0];
 		}
 		{	// v27: keep OUR palette in force - transfer_palette_ ran just
@@ -436,18 +436,32 @@ void scaling_scaled_frame(void)
 		*(vu16*)0x400001E = ui_y_real;
 		dispcnt |= 0x0800;
 	}
+	if(fit)
+	{	// v28: clip to the 180px pane. Cells are fully opaque (pixels 1..4)
+		// and the 24-cell viewport is wider than 180px, so without a window
+		// live content bleeds into the letterbox borders
+		*(vu16*)0x4000042 = (30<<8) | 210;     // WIN1H
+		*(vu16*)0x4000046 = 160;               // WIN1V 0..160
+		*(vu16*)0x4000048 = 0x1B00;            // WININ: win1 = BG0|BG1|BG3|OBJ
+		*(vu16*)0x400004A = 0x0008;            // WINOUT: border BG3 only
+		dispcnt |= 0x4000;
+	}
 	*(vu16*)0x4000000 = dispcnt;
 
 	*(vu16*)0x40000BA = 0;                     // disable-first: relatch SAD
 	*(vu32*)0x40000B0 = (u32)&sc_vtab0[1];
 	*(vu32*)0x40000B4 = 0x04000012;
-	*(vu32*)0x40000B8 = 159 | (0xA240u<<16);
+	// count MUST be 1: an HBlank-repeat DMA transfers its whole count every
+	// hblank (count reloads, source keeps advancing). 159 here sprayed the
+	// source through 51KB of EWRAM per frame - VOFS became whatever byte the
+	// walk ended on (v27: no vertical stretch, dead lines, ~22% slowdown)
+	*(vu32*)0x40000B8 = 1 | (0xA240u<<16);
 	*(vu16*)0x40000C6 = 0;
 	if(wenable)
 	{
 		*(vu32*)0x40000BC = (u32)&sc_vtab1[1];
 		*(vu32*)0x40000C0 = 0x04000016;
-		*(vu32*)0x40000C4 = 159 | (0xA240u<<16);
+		*(vu32*)0x40000C4 = 1 | (0xA240u<<16);
 	}
 	*(vu16*)0x40000D2 = 0;
 
