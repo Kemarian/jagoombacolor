@@ -415,3 +415,28 @@ steps + 1.6x cadence (P3 WIN0-split + budget), open/close erase-draw
 ordering (5f dropout / 2f doubling), feet 1-2px low (recheck after PD
 change), speed unmeasured in v28 GIFs (5.03x timebase mismatch between
 captures - re-capture with identical recorder settings).
+
+## v0.6-k2 RELEASE (2026-08-08) - engine works; firmware baked
+
+User confirmation on v29: "much, much better. cat split is gone, status
+bar is in its place." The scaling engine's correctness core is DONE:
+- true 10/9 vertical + 9/8 horizontal (Fit), verified bit-exact vs
+  resampled reference at the settled menu (SAD 0.00 per row)
+- window layer sub-tile-exact (WY&7 in vtab1), ROUND bar at rows 151-159
+- affine sprites seam-free (PA=227/PD=227 round-down-to-overlap)
+- WIN1 clip x=30..209 exact; no backdrop holes; no scatter/flash/tears
+- toggle Off pixel-identical restore via deferred rebuild
+The count=1 DMA lesson is the headline: one wrong halfword count cost
+three debug versions (v26-v28) of chasing its downstream symptoms.
+
+Release: jagoombacolor v0.6-k2 (debug bars removed, Metroid hardcode
+removed, labels "Fit"/"Stretch") baked into omega-de-kernel as goomba.h;
+kernel theme switched back to LIGHT (draw.h DARK undefined). Deliverable:
+ezkernel_k2.bin (rename to ezkernel.bin on SD root to flash).
+
+Still open (P3, polish): menu slide is tile-stepped (9px jumps, ~11f
+cadence, 1.6x slower than native) -> WIN0-split window model + budget
+tuning/IWRAM converter; open/close erase-draw ordering (5f bar dropout /
+2f doubling); feet seat 1-2px low (recheck after PD change); speed
+re-measure with identical recorder settings; CGB colorization of scaled
+mode still unaddressed (DMG-only engine).
