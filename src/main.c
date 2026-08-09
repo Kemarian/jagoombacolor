@@ -40,6 +40,12 @@ EWRAM_BSS u32 max_multiboot_size;		//largest possible multiboot transfer (init'd
 EWRAM_BSS u32 copiedfromrom=0;
 int main()
 {
+	//v30: ROM 3,1 waitstates + prefetch (power-on default is 4,2 with
+	//prefetch OFF - everything fetched from ROM ran almost half speed).
+	//EZ Omega DE runs us from PSRAM which takes 3,1; revert to 0x0000
+	//if real hardware disagrees.
+	*(vu16*)0x04000204 = 0x4317;
+
 	//this function does what boot.s used to do
 	extern u8 __rom_end__[]; //using this instead of __end__, because it's also cart compatible
 	extern u8 __eheap_start[];
