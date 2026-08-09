@@ -28,7 +28,13 @@ g_sgb_mask:	.byte 0	@sgb_mask
 g_update_border_palette:
 	.byte 0   @update_border_palette
 auto_border:
+	.if SCALING_DEBUG
+	.byte 0	@autoborder OFF in dbg builds: the SGB/skin border layer
+			@shares the letterbox with the timing bars and pollutes
+			@scaling captures
+	.else
 	.byte 1	@autoborder
+	.endif
 _autoborderstate:
 	.byte 0	@autoborderstate
 	.byte 0	@borderpartsadded
