@@ -14,7 +14,7 @@
 //restart, green=OAM pass) and a hardcoded Metroid DMG palette for
 //hue-separable layer forensics in GIF captures. Reaches the .s files too
 //(equates.h is cpp-preprocessed and includes this header).
-#define SCALING_DEBUG 0
+#define SCALING_DEBUG 1
 
 //#define LITTLESOUNDDJ 0
 //Little Sound DJ Hack requires M3/G6/Supercard
