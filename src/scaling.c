@@ -420,6 +420,12 @@ void scaling_scaled_frame(void)
 	sc_busy=1;
 #if SCALING_DEBUG
 	*(vu16*)0x05000000 = 0x001F;   // TIMING DEBUG: red while building
+#else
+	*(vu16*)0x05000000 = 0;        // pin the backdrop black NOW:
+	                               // transfer_palette_ ran just before us
+	                               // (gamma/white-palette values) and the
+	                               // borders blink on long frames if the
+	                               // black write only happens at build end
 #endif
 
 	// ---- PHASE A: display programming, guaranteed early ----
