@@ -556,3 +556,27 @@ Two failures root-caused by the cause-colored bars + startup dissection:
    alloc (age>16 then age>8 - stamps re-mark displayed cells within 8
    frames, so >8 is safe). Expect stall trains gone; ~8% speed deficit
    should shrink with them.
+
+## v33 (2026-08-09) - GBC attribute support
+
+LADX forensics (v32): ~90% of every frame palette-flattened (single
+correct-valued live-tracked palette applied globally - so palette RAM
+handling was already right, only per-tile selection missing); ornate
+chest/banner = VRAM-bank attr bug (unrelated art); user's chest = h-flip
+attr bug (exact mirror score 1.00). Geometry/HUD/transitions/sprites all
+verified exact - v32 core is sound for GBC games.
+
+v33: full GBC BG attribute support.
+- PALETTE (out of the key): cells stay palette-agnostic with pixels 1..4;
+  the map entry carries GBA palette row = attr&7. GBA rows 0-7 = the 8
+  GBC BG palettes at entries 1-4 (normal mode keeps rows 8-15; no
+  conflict). Mixed-palette pairs take tile A's row (straddle slivers
+  only). DMG = row 0. Live palette writes flow via sc_load_palette every
+  frame (fades keep working).
+- BANK + FLIPS (in the key): key = bit28|a10|b10|flips4|phase4; tile ids
+  0..767 with bank1 at +384 (matches dirty-bit layout, TILE_DIRTY works
+  unchanged); SC_TILE_ADDR maps id->XGB_VRAM/bank. hflip = sc_nibR
+  reversed-nibble table (zero per-row cost), vflip = reversed row order.
+- Attr reads: attr map = same offsets +0x2000 (VRAM bank1); attr writes
+  already set dirty_map_words (verified bank-agnostic) so attr changes
+  invalidate rows for free. gbc_mode gates it all; DMG unchanged.

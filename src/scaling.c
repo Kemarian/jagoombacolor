@@ -27,6 +27,7 @@
 #include "scaling.h"
 
 extern u8 lcdctrl0frame_;
+extern u8 gbc_mode;
 extern u8 scrollX, scrollY, windowX, windowY;
 extern u32 ui_border_request;
 extern u32 DIRTY_TILE_BITS[];
@@ -53,6 +54,8 @@ EWRAM_BSS static u16 sc_hval[HASH_SIZE];
 EWRAM_BSS static u32 sc_cell_key[MAX_TILES];
 EWRAM_BSS static u8  sc_cell_gen[MAX_TILES];
 EWRAM_BSS static u32 sc_nib[256];
+EWRAM_BSS static u32 sc_nibR[256];  // v33: nibble-reversed expansion for
+                                    // h-flipped tiles (same cost path)
 EWRAM_BSS static u16 sc_wbuilt[18];
 EWRAM_BSS static u32 sc_dirty_snap[12];
 EWRAM_BSS static u8  sc_mapdirty[64];   // per-frame snapshot of the map
@@ -77,6 +80,10 @@ EWRAM_BSS static u16 sc_row_c0[32]; // per BG row: C0 the row was built for
 static u16 sc_ncells, sc_tombs, sc_evict_ptr;
 // (v32: vquad rebuilds every frame from the per-line capture - no tuple)
 static u8 sc_gen, sc_tables_ok, sc_active, sc_last_lcdc, sc_last_wy;
+static u8 sc_gbc;                   // v33: GBC attribute decoding active
+// tile ids 0..767: 0-383 bank0, 384-767 bank1 (matches the dirty-bit
+// layout: bit = id/2, bank1 bits start at byte offset 24)
+#define SC_TILE_ADDR(t) (XGB_VRAM + (((t)<384)?(t)*16:((t)-384)*16+0x2000))
 static u8 sc_N, sc_D;               // current ratio (9/8 or 3/2)
 static volatile u8 sc_busy;         // menu-sync vs vblank reentry guard
 
@@ -103,10 +110,15 @@ static void sc_build_tables(void)
 	int b,i,p,x;
 	for(b=0;b<256;b++)
 	{
-		u32 v=0;
+		u32 v=0,w=0;
 		for(i=0;i<8;i++)
-			v |= ((u32)((b>>(7-i))&1))<<(i*4);
+		{
+			u32 bit=(u32)((b>>(7-i))&1);
+			v |= bit<<(i*4);
+			w |= bit<<((7-i)*4);
+		}
 		sc_nib[b]=v;
+		sc_nibR[b]=w;
 	}
 	for(b=0;b<161;b++)
 		sc_vdelta[b] = b - (9*b)/10;          // single phase (no flicker)
@@ -135,20 +147,29 @@ static void sc_build_tables(void)
 
 // Convert one output tile: pair (a,b) at phase p -> 8 rows of 8 nibbles
 // picked from the 16-nibble source pair rows, pixel values shifted to 1..4.
-static void sc_convert_cell(const u8 *ta,const u8 *tb,int p,u32 *dst)
+static void sc_convert_cell(const u8 *ta,const u8 *tb,int p,u32 *dst,
+                            int fA,int fB)
 {
 	// v30 mask-combine: build the 8-nibble source string v starting at
 	// nibble q, then place each output from v/v<<4/v<<8/v<<12 by the
 	// per-phase masks. ~10 ops/row vs the old per-pixel loop.
+	// v33 flips: hflip = the reversed nibble table (same cost), vflip =
+	// reversed source row order, per tile (GBC attrs bit5/6).
 	u32 q4=sc_ph_q4[p];
 	u32 m0=sc_ph_m[p][0],m1=sc_ph_m[p][1];
 	u32 m2=sc_ph_m[p][2],m3=sc_ph_m[p][3];
+	const u32 *na=(fA&1)?sc_nibR:sc_nib;
+	const u32 *nb=(fB&1)?sc_nibR:sc_nib;
 	int r;
 	for(r=0;r<8;r++)
 	{
-		u32 v = sc_nib[ta[r*2]] | (sc_nib[ta[r*2+1]]<<1);
+		int rA=(fA&2)?(7-r):r;
+		u32 v = na[ta[rA*2]] | (na[ta[rA*2+1]]<<1);
 		if(q4)
-			v = (v>>q4) | ((sc_nib[tb[r*2]] | (sc_nib[tb[r*2+1]]<<1))<<(32-q4));
+		{
+			int rB=(fB&2)?(7-r):r;
+			v = (v>>q4) | ((nb[tb[rB*2]] | (nb[tb[rB*2+1]]<<1))<<(32-q4));
+		}
 		dst[r] = ((v&m0) | ((v<<4)&m1) | ((v<<8)&m2) | ((v<<12)&m3))
 		         + 0x11111111;
 	}
@@ -170,7 +191,7 @@ static void sc_full_reset(void)
 {
 	int i;
 	u32 *bt=(u32*)(CHARBASE1 + BLANK_TILE*32);
-	u16 blank=BLANK_TILE|(BG_PAL<<12);
+	u16 blank=BLANK_TILE;
 	vu16 *m;
 	for(i=0;i<HASH_SIZE;i++) sc_hkey[i]=0;
 	for(i=0;i<18;i++) sc_wbuilt[i]=0;
@@ -231,10 +252,11 @@ static u32 sc_alloc_cell(void)
 	return MAX_TILES;
 }
 
-// key: bit24 marker | a(9b)<<15 | b(9b)<<6 | phase(4b)
-static u32 sc_lookup(u32 a,u32 b,u32 p)
+// key: bit28 marker | a(10b)<<18 | b(10b)<<8 | flips(4b)<<4 | phase(4b)
+// (v33: tile ids carry the VRAM bank, flips carry GBC attr bits 5-6)
+static u32 sc_lookup(u32 a,u32 b,u32 p,u32 f)
 {
-	u32 key = (1u<<24)|(a<<15)|(b<<6)|p;
+	u32 key = (1u<<28)|(a<<18)|(b<<8)|(f<<4)|p;
 	u32 h = (key*0x9E3779B1u >> 20)&(HASH_SIZE-1);
 	u32 first=HASH_SIZE, c;
 	for(;;)
@@ -260,7 +282,8 @@ static u32 sc_lookup(u32 a,u32 b,u32 p)
 	                                // stably glitched: rows completed
 	                                // with blanks and never rebuilt.)
 	sc_budget--;
-	sc_convert_cell(XGB_VRAM+a*16, XGB_VRAM+b*16, p, sc_cell_vram(c));
+	sc_convert_cell(SC_TILE_ADDR(a), SC_TILE_ADDR(b), p, sc_cell_vram(c),
+	                f&3, f>>2);
 	sc_cell_key[c]=key; sc_cell_gen[c]=sc_gen;
 	if(sc_hkey[first]==KEY_TOMB) sc_tombs--;
 	sc_hkey[first]=key; sc_hval[first]=c;
@@ -318,7 +341,7 @@ static void sc_update_dirty(void)
 	while(sc_sweep_cell<sc_ncells && sc_budget>0)
 	{
 		u32 key=sc_cell_key[sc_sweep_cell], a, b;
-		a=(key>>15)&0x1FF; b=(key>>6)&0x1FF;
+		a=(key>>18)&0x3FF; b=(key>>8)&0x3FF;
 		if(key && (TILE_DIRTY(a) || TILE_DIRTY(b)))
 		{
 			if((u8)(sc_gen - sc_cell_gen[sc_sweep_cell]) > 8)
@@ -336,8 +359,9 @@ static void sc_update_dirty(void)
 			}
 			else
 			{
-				sc_convert_cell(XGB_VRAM+a*16, XGB_VRAM+b*16, key&0xF,
-					sc_cell_vram(sc_sweep_cell));
+				sc_convert_cell(SC_TILE_ADDR(a), SC_TILE_ADDR(b),
+					(int)(key&0xF), sc_cell_vram(sc_sweep_cell),
+					(int)((key>>4)&3), (int)((key>>6)&3));
 				sc_budget--;
 				if(SC_TIME_UP()) sc_budget=0;
 			}
@@ -354,21 +378,32 @@ static void sc_update_dirty(void)
 // Look up the output tile for content column C (wrapped) of source row mrow.
 static u16 sc_cell_entry(const u8 *mrow,int C,int mode8000,int ccols)
 {
-	u32 a,b,p,s0;
+	u32 a,b,p,s0,aa,ab,f;
 	while(C>=ccols) C-=ccols;
 	s0=(8*C*sc_D)/sc_N;
-	a=mrow[(s0>>3)&31];
-	b=mrow[((s0>>3)+1)&31];
+	{
+		int ia=(s0>>3)&31, ib=((s0>>3)+1)&31;
+		a=mrow[ia];
+		b=mrow[ib];
+		// v33: GBC attribute map is the same offsets in VRAM bank 1
+		// (+0x2000). Mixed-palette pairs take tile A's palette for the
+		// whole cell - straddle slivers only, attrs cluster by object.
+		aa = sc_gbc ? mrow[ia+0x2000] : 0;
+		ab = sc_gbc ? mrow[ib+0x2000] : 0;
+	}
 	p=C%sc_N;
 	if(!mode8000)
 	{
 		if(a<128) a+=256;
 		if(b<128) b+=256;
 	}
+	if(aa&8) a+=384;               // VRAM bank attr
+	if(ab&8) b+=384;
+	f=((aa>>5)&3)|(((ab>>5)&3)<<2);
 	{
-		u32 t=sc_lookup(a,b,p);
+		u32 t=sc_lookup(a,b,p,f);
 		if(!t) return 0;            // budget exhausted: retry next frame
-		return (u16)(t | (BG_PAL<<12));
+		return (u16)(t | ((aa&7)<<12));
 	}
 }
 
@@ -388,6 +423,23 @@ static void sc_stamp_slot(int mr,int slot)
 	u32 t=sc_map_get(mr,slot)&0x3FF;
 	if(t>=TILE_BASE && t<TILE_BASE+MAX_TILES)
 		sc_cell_gen[t-TILE_BASE]=sc_gen;
+}
+
+// v33: scaled BG uses GBA palette rows 0-7 = the 8 GBC BG palettes at
+// entries 1-4 (cell pixels 1..4 = GB colors 0..3; map entry carries the
+// row from the tile's attr). Normal mode keeps rows 8-15 (gamma copies
+// from transfer_palette_) - no conflict. DMG games use row 0 only.
+static void sc_load_palette(void)
+{
+	vu16 *pal=(vu16*)0x05000000;
+	u16 *src=(u16*)gbc_palette;
+	int p,n = gbc_mode ? 8 : 1;
+	for(p=0;p<n;p++)
+	{
+		pal[p*16+1]=src[p*4+0]; pal[p*16+2]=src[p*4+1];
+		pal[p*16+3]=src[p*4+2]; pal[p*16+4]=src[p*4+3];
+	}
+	pal[0]=0;
 }
 
 void scaling_scaled_frame(void)
@@ -413,14 +465,10 @@ void scaling_scaled_frame(void)
 		*(vu16*)0x4000012 = sc_vquad[0][1];
 		*(vu16*)0x4000014 = sc_vquad[0][2];
 		*(vu16*)0x4000016 = sc_vquad[0][3];
-		{	// v27: keep OUR palette in force - transfer_palette_ ran just
-			// before us with gamma values; skipping this write made every
-			// busy frame flash gamma-gray
-			vu16 *pal=(vu16*)0x05000100;
-			u16 *src=(u16*)gbc_palette;
-			pal[1]=src[0]; pal[2]=src[1]; pal[3]=src[2]; pal[4]=src[3];
-			*(vu16*)0x05000000 = 0;
-		}
+		// v27: keep OUR palette in force - transfer_palette_ ran just
+		// before us with gamma values; skipping this made busy frames
+		// flash gamma-gray
+		sc_load_palette();
 		return;
 	}
 	sc_busy=1;
@@ -441,6 +489,7 @@ void scaling_scaled_frame(void)
 	if(!sc_tables_ok) { sc_build_tables(); sc_tables_ok=1; }
 
 	lcdc = lcdctrl0frame_;
+	sc_gbc = gbc_mode;
 	ccols = (32*sc_N)/sc_D;                    // 36 (fit) / 48 (stretch)
 	ncontent = fit ? 24 : 31;
 	guardL   = fit ? 4  : 0;
@@ -529,11 +578,7 @@ void scaling_scaled_frame(void)
 	*(vu16*)0x40000C6 = 0;                     // DMA1 retired in v31
 	*(vu16*)0x40000D2 = 0;
 
-	{	// palette (entries 1..4 of BG palette 8)
-		vu16 *pal=(vu16*)0x05000100;
-		u16 *src=(u16*)gbc_palette;
-		pal[1]=src[0]; pal[2]=src[1]; pal[3]=src[2]; pal[4]=src[3];
-	}
+	sc_load_palette();
 
 	// ---- PHASE B: budgeted build work (may run past vblank safely) ----
 	// v30: the real limit is time (SC_TIME_UP in the convert paths); the
@@ -568,7 +613,7 @@ void scaling_scaled_frame(void)
 	mdirty = sc_mapdirty + ((lcdc&0x08) ? 32 : 0);
 	wmap   = XGB_VRAM + ((lcdc&0x40) ? 0x1C00 : 0x1800);
 	wdirty = sc_mapdirty + ((lcdc&0x40) ? 32 : 0);
-	blank = BLANK_TILE | (BG_PAL<<12);
+	blank = BLANK_TILE;
 	if(((lcdc ^ sc_last_lcdc) & 0x58) || sc_wst_cur != sc_last_wy)
 	{	// v26: NO full wipe on window change - the old entries stay
 		// displayed until each row's replacement is built (same rule as

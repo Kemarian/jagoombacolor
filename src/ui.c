@@ -330,7 +330,7 @@ char *const hostname[]={"Crap","Prot","GBA","GBP","NDS"};
 char *const ctrltxt[]={"1P","2P","Link2P","Link3P","Link4P"};
 char *const bordtxt[]={"Black","Grey","Blue","None"};
 #if SCALING_DEBUG
-char *const scaletxt[]={"Off","Fit v32dbg","Stretch v32dbg"};
+char *const scaletxt[]={"Off","Fit v33dbg","Stretch v33dbg"};
 #else
 char *const scaletxt[]={"Off","Fit","Stretch"};
 #endif
