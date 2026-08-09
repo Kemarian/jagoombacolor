@@ -31,6 +31,10 @@ extern u8 scrollX, scrollY, windowX, windowY;
 extern u32 ui_border_request;
 extern u32 DIRTY_TILE_BITS[];
 extern u8 VRAM_chr_lastAddr;
+extern u32 _bigbufferbase2;   // v31: completed frame's per-line records
+                              // (6 words/GB line; +2 = xyscroll =
+                              // (scy-8)<<16 | (scx-40), what DMA0 would
+                              // have replayed in normal mode)
 
 #define SCALED_MAP   ((vu16*)0x06005000)
 #define WIN_MAP      ((vu16*)0x06006000)
@@ -60,8 +64,10 @@ EWRAM_BSS static u8  sc_srcsel[9][8];   // per phase: source nibble 0..15
 EWRAM_BSS static u32 sc_ph_m[9][4];     // v30 mask-combine: per phase,
 EWRAM_BSS static u8  sc_ph_q4[9];       // masks for off 0..-3 + 4*sel[0]
 EWRAM_BSS static u8  sc_vdelta[161];
-EWRAM_BSS static u16 sc_vtab0[161];
-EWRAM_BSS static u16 sc_vtab1[161];
+EWRAM_BSS static u16 sc_vquad[161][4]; // v31: per-line {BG0HOFS,BG0VOFS,
+                                       // BG1HOFS,BG1VOFS} DMA0 stream -
+                                       // per-band scroll needs per-line
+                                       // HOFS, not just VOFS
 
 EWRAM_BSS static u16 sc_row_c0[32]; // per BG row: C0 the row was built for
                                     // (0xFFFF = invalid). Ring viewport:
@@ -69,9 +75,8 @@ EWRAM_BSS static u16 sc_row_c0[32]; // per BG row: C0 the row was built for
                                     // so scrolling reuses all cells and
                                     // only entering columns get built.
 static u16 sc_ncells, sc_tombs, sc_evict_ptr;
-static int sc_last_scy=-1;
-static u8 sc_wsub;                  // v29: window sub-tile Y (WY&7) baked
-                                    // into sc_vtab1; rebuild on change
+static u32 sc_bt0=0xFFFFFFFF;       // v31: vquad rebuild tuples -
+static u32 sc_bt1;                  // {scx,scy,wsub,split} {scx2,scy2,fit}
 static u8 sc_gen, sc_tables_ok, sc_active, sc_last_lcdc, sc_last_wy;
 static u8 sc_N, sc_D;               // current ratio (9/8 or 3/2)
 static volatile u8 sc_busy;         // menu-sync vs vblank reentry guard
@@ -172,7 +177,7 @@ static void sc_full_reset(void)
 	for(i=0;i<18;i++) sc_wbuilt[i]=0;
 	for(i=0;i<32;i++) sc_row_c0[i]=0xFFFF;
 	sc_ncells=0; sc_tombs=0; sc_evict_ptr=0;
-	sc_last_scy=-1;
+	sc_bt0=0xFFFFFFFF;
 	for(i=0;i<8;i++) bt[i]=0;
 	m=SCALED_MAP; for(i=0;i<0x800;i++) m[i]=blank;   // both blocks (64x32)
 	m=WIN_MAP;    for(i=0;i<0x400;i++) m[i]=blank;
@@ -282,6 +287,7 @@ static void sc_update_dirty(void)
 		sc_sweep_active=1;
 		sc_sweep_obj=0;
 		sc_sweep_cell=0;
+		*(vu16*)0x05000000 = 0x7C1F;   // CAUSE DEBUG: magenta = sweep restart
 	}
 	if(!sc_sweep_active) return;
 
@@ -315,6 +321,10 @@ static void sc_update_dirty(void)
 				sc_hash_del(key);
 				sc_cell_key[sc_sweep_cell]=0;
 				sc_cell_gen[sc_sweep_cell]=(u8)(sc_gen-64);
+				// v31: evictions are cheap but not free (hash probes,
+				// tombstone pressure) - gate them like conversions
+				sc_budget--;
+				if(SC_TIME_UP()) sc_budget=0;
 			}
 			else
 			{
@@ -377,28 +387,24 @@ void scaling_scaled_frame(void)
 	u8 lcdc;
 	const u8 *gbmap, *wmap;
 	u8 *wdirty, *mdirty;
-	int mode8000,r,j,scy,scx,row0;
+	int mode8000,r,j,scy,scx;
 	int wenable,wtop,fit;
 	int P,C0,phase,ccols,ncontent,guardL,guardR;
+	int split,scx2,scy2,bi;
 	u16 dispcnt, blank;
 
 	if(sc_busy)
 	{	// mid-build reentry: skip work but keep the display coherent
-		// (both VOFS DMAs must be disabled+re-armed: source only
-		// re-latches on a 0->1 enable transition)
+		// (DMA0 must be disabled+re-armed: source only re-latches on a
+		// 0->1 enable transition)
 		*(vu16*)0x40000BA = 0;
-		*(vu32*)0x40000B0 = (u32)&sc_vtab0[1];
-		*(vu32*)0x40000B4 = 0x04000012;
-		*(vu32*)0x40000B8 = 1 | (0xA240u<<16);
-		*(vu16*)0x4000012 = sc_vtab0[0];
-		*(vu16*)0x40000C6 = 0;
-		if(sc_wst_cur>>7)   // debounced window state
-		{
-			*(vu32*)0x40000BC = (u32)&sc_vtab1[1];
-			*(vu32*)0x40000C0 = 0x04000016;
-			*(vu32*)0x40000C4 = 1 | (0xA240u<<16);
-			*(vu16*)0x4000016 = sc_vtab1[0];
-		}
+		*(vu32*)0x40000B0 = (u32)&sc_vquad[1][0];
+		*(vu32*)0x40000B4 = 0x04000010;
+		*(vu32*)0x40000B8 = 4 | (0xA260u<<16);
+		*(vu16*)0x4000010 = sc_vquad[0][0];
+		*(vu16*)0x4000012 = sc_vquad[0][1];
+		*(vu16*)0x4000014 = sc_vquad[0][2];
+		*(vu16*)0x4000016 = sc_vquad[0][3];
 		{	// v27: keep OUR palette in force - transfer_palette_ ran just
 			// before us with gamma values; skipping this write made every
 			// busy frame flash gamma-gray
@@ -424,6 +430,25 @@ void scaling_scaled_frame(void)
 	ncontent = fit ? 24 : 31;
 	guardL   = fit ? 4  : 0;
 	guardR   = fit ? 5  : 1;
+	{	// v31: raster-split detection from the per-line capture the GB
+		// core fills for the normal renderer's scanline DMA. Batman-class
+		// games keep the HUD in the BG map and reload SCX/SCY at a fixed
+		// scanline; one sampled scroll made the HUD ride the world.
+		// (xyscroll word: (scy-8)<<16 | (scx-40), 6 words per GB line.)
+		u32 *sb=(u32*)_bigbufferbase2;
+		u32 v0=sb[2], v; int i;
+		split=0; scx2=scx; scy2=scy;
+		for(i=1;i<144;i++)
+			if((v=sb[i*6+2])!=v0)
+			{
+				split=i;
+				scx2=(int)((v+40)&0xFF);
+				scy2=(int)(((v>>16)+8)&0xFF);
+				break;
+			}
+		scx=(int)((v0+40)&0xFF);
+		scy=(int)(((v0>>16)+8)&0xFF);
+	}
 	P  = (scx*sc_N)/sc_D;
 	C0 = P>>3;
 	phase = P&7;
@@ -442,37 +467,42 @@ void scaling_scaled_frame(void)
 		wtop = sc_wst_cur & 0x1F;
 	}
 
-	{	// v29: sub-tile window seating. The window map row is tile-
-		// quantized (wtop=WY>>3), which parked the ROUND bar 7 rows high
-		// (WY=135) with its tilemap row 1 (white panel body) visible below
-		// = the "white bar". The per-line VOFS stream absorbs the
-		// remainder: shifting vtab1 by WY&7 seats the window exactly.
-		// (wsub is undebounced - during slides it may lead wtop by <=7px
-		// for the 3 debounce frames; exact at rest, which is what shows.)
+	{	// vquad rebuild: per-line {HOFS0,VOFS0,HOFS1,VOFS1}. Vertical =
+		// scy_band - delta[y] (v29 wsub folds the window's sub-tile seat
+		// into VOFS1); horizontal per band because a raster split can
+		// carry a different SCX above/below the split line.
 		int wsub = wenable ? (windowY&7) : 0;
-		if(scy != sc_last_scy || wsub != sc_wsub)
+		u32 bt0 = (u32)scx | ((u32)scy<<8) | ((u32)wsub<<16) | ((u32)split<<24);
+		u32 bt1 = (u32)scx2 | ((u32)scy2<<8) | (fit?0x80000000u:0);
+		if(bt0!=sc_bt0 || bt1!=sc_bt1)
 		{
-			int y;
+			int y, xb=fit?30:0;
+			int ysplit = split ? (split*10+8)/9 : 999;
+			u16 hA=(u16)(((scx *sc_N)/sc_D - xb)&0x1FF);
+			u16 hB=(u16)(((scx2*sc_N)/sc_D - xb)&0x1FF);
+			u16 h1=(u16)((0-xb)&0x1FF);
 			for(y=0;y<161;y++)
 			{
-				sc_vtab0[y] = (u16)((scy - sc_vdelta[y]) & 0xFF);
-				sc_vtab1[y] = (u16)((0   - sc_vdelta[y] - wsub) & 0xFF);
+				int A=(y<ysplit);
+				sc_vquad[y][0]= A?hA:hB;
+				sc_vquad[y][1]=(u16)(((A?scy:scy2)-sc_vdelta[y])&0xFF);
+				sc_vquad[y][2]= h1;
+				sc_vquad[y][3]=(u16)((0-sc_vdelta[y]-wsub)&0xFF);
 			}
-			sc_last_scy = scy;
-			sc_wsub = (u8)wsub;
+			sc_bt0=bt0; sc_bt1=bt1;
 		}
 	}
 
 	REG_BG0CNT = 3 | (1<<2) | (10<<8) | (1<<14);            // 64x32 ring
-	*(vu16*)0x4000010 = (u16)(((C0&63)*8 + phase - (fit?30:0)) & 0x1FF);
-	*(vu16*)0x4000012 = sc_vtab0[0];
+	*(vu16*)0x4000010 = sc_vquad[0][0];
+	*(vu16*)0x4000012 = sc_vquad[0][1];
 
 	dispcnt = 0x1140;
 	if(wenable)
 	{
 		*(vu16*)0x400000A = 2 | (1<<2) | (12<<8);
-		*(vu16*)0x4000014 = (u16)(fit ? -30 : 0);
-		*(vu16*)0x4000016 = sc_vtab1[0];
+		*(vu16*)0x4000014 = sc_vquad[0][2];
+		*(vu16*)0x4000016 = sc_vquad[0][3];
 		dispcnt |= 0x0200;
 	}
 	if(ui_border_request & 1)
@@ -495,20 +525,14 @@ void scaling_scaled_frame(void)
 	*(vu16*)0x4000000 = dispcnt;
 
 	*(vu16*)0x40000BA = 0;                     // disable-first: relatch SAD
-	*(vu32*)0x40000B0 = (u32)&sc_vtab0[1];
-	*(vu32*)0x40000B4 = 0x04000012;
-	// count MUST be 1: an HBlank-repeat DMA transfers its whole count every
-	// hblank (count reloads, source keeps advancing). 159 here sprayed the
-	// source through 51KB of EWRAM per frame - VOFS became whatever byte the
-	// walk ended on (v27: no vertical stretch, dead lines, ~22% slowdown)
-	*(vu32*)0x40000B8 = 1 | (0xA240u<<16);
-	*(vu16*)0x40000C6 = 0;
-	if(wenable)
-	{
-		*(vu32*)0x40000BC = (u32)&sc_vtab1[1];
-		*(vu32*)0x40000C0 = 0x04000016;
-		*(vu32*)0x40000C4 = 1 | (0xA240u<<16);
-	}
+	*(vu32*)0x40000B0 = (u32)&sc_vquad[1][0];
+	*(vu32*)0x40000B4 = 0x04000010;
+	// count MUST equal regs-per-line (v28 lesson: an HBlank-repeat DMA
+	// transfers its whole count every hblank, count reloads, source keeps
+	// advancing). v31: 4 halfwords {HOFS0,VOFS0,HOFS1,VOFS1}, dest
+	// inc+reload back to 0x4000010 each line.
+	*(vu32*)0x40000B8 = 4 | (0xA260u<<16);
+	*(vu16*)0x40000C6 = 0;                     // DMA1 retired in v31
 	*(vu16*)0x40000D2 = 0;
 
 	{	// palette (entries 1..4 of BG palette 8)
@@ -558,6 +582,8 @@ void scaling_scaled_frame(void)
 		// left the window and must be transparent).
 		int i, lim = wenable ? wtop : 18;
 		vu16 *m=WIN_MAP;
+		*(vu16*)0x05000000 = 0x7C00;   // CAUSE DEBUG: blue = lcdc/window
+		                               // change -> full row invalidation
 		for(i=0;i<lim*32;i++) m[i]=blank;
 		for(i=0;i<18;i++) sc_wbuilt[i]=0;
 		// BG rows hidden behind the window aren't stamped and may have
@@ -573,52 +599,67 @@ void scaling_scaled_frame(void)
 		for(i=0;i<8;i++) bt[i]=0;
 	}
 
-	// ---- BG0 ring viewport ----
-	row0 = scy>>3;
-	for(r=0;r<VIS_ROWS;r++)
+	// ---- BG0 ring viewport (v31: one pass per raster-split band; the
+	// playfield band builds first so the HUD band wins if the wrapped
+	// playfield ever touches the HUD's map rows) ----
+	for(bi = split?1:0; bi>=0; bi--)
 	{
-		int mr=(row0+r)&31;
-		const u8 *mrow;
-		u16 st;
-		if(wenable && r>wtop+1) continue;
-		st = sc_row_c0[mr];
-		if(mdirty[mr]) { st=0xFFFF; sc_row_c0[mr]=0xFFFF; }
-		// (persist the invalidation NOW: if the rebuild below runs out of
-		// budget, the row must stay invalid for next frame - v26)
-		if(st==(u16)C0)
-		{	// valid: rotate eviction stamps (1/8 of rows per frame)
-			if(((mr^sc_gen)&7)==0)
-				for(j=0;j<ncontent;j++) sc_stamp_slot(mr,C0+j);
-			continue;
-		}
-		// rebuilding: the row's OLD cells are still on screen this frame -
-		// stamp them every frame or a slow convergence gets its displayed
-		// cells evicted underneath it (menu-churn garbage loop)
-		for(j=0;j<ncontent;j++) sc_stamp_slot(mr,C0+j);
-		mrow = gbmap + mr*32;
-		if(st!=0xFFFF && (st==(u16)(C0-1) || st==(u16)(C0+1)))
-		// (st==0xFFFF must never classify as a pan: at C0==0 the invalid
-		// sentinel equals (u16)(C0-1) - v26 sentinel-collision fix)
-		{	// panning: build only the entering column
-			int A = (st==(u16)(C0-1)) ? C0+ncontent-1 : C0;
-			u16 e = sc_cell_entry(mrow,A,mode8000,ccols);
-			if(!e) continue;               // budget: retry next frame
-			sc_map_put(mr,A,e);
-		}
-		else
-		{	// teleport/new row: full rebuild (budget-gated)
-			int complete=1;
-			for(j=0;j<ncontent;j++)
-			{
-				u16 e = sc_cell_entry(mrow,C0+j,mode8000,ccols);
-				if(!e) { complete=0; continue; }
-				sc_map_put(mr,C0+j,e);
+		int blo  = bi ? split : 0;
+		int bhi  = (split && !bi) ? split-1 : 143;
+		int bscx = bi ? scx2 : scx;
+		int bscy = bi ? scy2 : scy;
+		int P_   = (bscx*sc_N)/sc_D;
+		int C0_  = P_>>3;
+		int rlo  = (bscy+blo)>>3, rhi=(bscy+bhi)>>3, rr;
+		for(rr=rlo;rr<=rhi;rr++)
+		{
+			int mr=rr&31;
+			const u8 *mrow;
+			u16 st;
+			if(wenable)
+			{	// rows fully hidden behind the window: don't build
+				int g0=(rr*8-bscy)&0xFF;
+				if(g0>wtop*8+8 && g0<160) continue;
 			}
-			if(!complete) continue;
+			st = sc_row_c0[mr];
+			if(mdirty[mr]) { st=0xFFFF; sc_row_c0[mr]=0xFFFF; }
+			// (persist the invalidation NOW: if the rebuild below runs out
+			// of budget, the row must stay invalid for next frame - v26)
+			if(st==(u16)C0_)
+			{	// valid: rotate eviction stamps (1/8 of rows per frame)
+				if(((mr^sc_gen)&7)==0)
+					for(j=0;j<ncontent;j++) sc_stamp_slot(mr,C0_+j);
+				continue;
+			}
+			// rebuilding: the row's OLD cells are still on screen this
+			// frame - stamp them every frame or a slow convergence gets its
+			// displayed cells evicted underneath it (menu-churn loop)
+			for(j=0;j<ncontent;j++) sc_stamp_slot(mr,C0_+j);
+			mrow = gbmap + mr*32;
+			if(st!=0xFFFF && (st==(u16)(C0_-1) || st==(u16)(C0_+1)))
+			// (st==0xFFFF must never classify as a pan: at C0==0 the
+			// invalid sentinel equals (u16)(C0-1) - v26 fix)
+			{	// panning: build only the entering column
+				int A = (st==(u16)(C0_-1)) ? C0_+ncontent-1 : C0_;
+				u16 e = sc_cell_entry(mrow,A,mode8000,ccols);
+				if(!e) continue;               // budget: retry next frame
+				sc_map_put(mr,A,e);
+			}
+			else
+			{	// teleport/new row: full rebuild (budget-gated)
+				int complete=1;
+				for(j=0;j<ncontent;j++)
+				{
+					u16 e = sc_cell_entry(mrow,C0_+j,mode8000,ccols);
+					if(!e) { complete=0; continue; }
+					sc_map_put(mr,C0_+j,e);
+				}
+				if(!complete) continue;
+			}
+			for(j=1;j<=guardL;j++) sc_map_put(mr,C0_-j,blank);
+			for(j=0;j<guardR;j++)  sc_map_put(mr,C0_+ncontent+j,blank);
+			sc_row_c0[mr]=(u16)C0_;
 		}
-		for(j=1;j<=guardL;j++) sc_map_put(mr,C0-j,blank);
-		for(j=0;j<guardR;j++)  sc_map_put(mr,C0+ncontent+j,blank);
-		sc_row_c0[mr]=(u16)C0;
 	}
 
 	// ---- BG1 window layer (screen-fixed) ----

@@ -499,3 +499,38 @@ switch if hardware disagrees - mGBA proxy unaffected); mask-combine
 correctness vs old converter (verify: Catrap settled menu must stay
 SAD=0 vs v29 captures); VCOUNT budget stealing GB-core time on burst
 frames (acceptable by design: stale beats torn, slow beats stale).
+
+## v30 Batman forensics (2026-08-09) + v31 plan
+
+Measured (2808/2351-frame pair, comparable timebases):
+- HUD-walk bug: CONFIRMED raster split at LY=16. HUD = GB lines 0-15 in
+  the BG tilemap, exclusive top band; game reloads SCX/SCY at line 16.
+  Our once-per-frame scroll sample renders it as world geometry: HUD
+  tracks scroll with correlation -1.0000 (residual 0.00px) and wraps
+  every 256 game px. No GB-window usage in this game at all.
+- Speed: 100% when idle, 80-90% under scroll load. The loss is NOT
+  converter throughput - it is discrete stalls: 2-6-frame freezes at
+  EXACTLY 4 Hz (every ~15 frames) during scroll, each with a full-red
+  border flash. 15 frames at the measured scroll rate = one 8px tile
+  column - suspicion: Batman double-buffers its BG map (LCDC bit3 flip
+  per streamed column), and our lcdc&0x58 wipe-block does a full
+  invalidation per flip. Needs cause-instrumentation to confirm.
+- Otherwise CLEAN under scroll: stale cells at control baseline
+  (0.52/frame vs orig 0.42), ZERO palette errors, ZERO sprite dropouts,
+  geometry verified exact (floor line at 128*10/9). Transition bursts
+  (title/cutscene tile uploads) still show red unconverted fill decaying
+  over ~17 frames - acceptable, gated by design.
+
+v31 batch:
+1. TWO-BAND RASTER SPLIT (the HUD fix): read the per-line scroll state
+   the GB core already captures into BG0CNT_SCROLL_BUFF (verify filled
+   in scaled mode), detect one split line, map both bands through 10/9,
+   stream 4 regs/line {BG0HOFS,BG0VOFS,BG1HOFS,BG1VOFS} so bands can
+   have distinct scx, and build viewport rows per band (own C0/phase +
+   screen-fixed band anchoring for the HUD band).
+2. 4Hz stall diagnosis: cause-colored debug bars (blue = lcdc-change
+   full invalidation, magenta = sweep restart, red = plain build) - one
+   capture round pins the driver; if it is the map-select flip, follow
+   with flip-aware invalidation (dirty-driven instead of nuke-all).
+3. Evictions in the sweep get time-gate + per-frame cap (v30 oversight:
+   ungated eviction storm can tombstone-degrade the hash).
