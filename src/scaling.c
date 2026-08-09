@@ -57,6 +57,8 @@ EWRAM_BSS static u8  sc_mapdirty[64];   // per-frame snapshot of the map
                                         // dirty_map_words directly lets
                                         // one loop wipe the other's signal
 EWRAM_BSS static u8  sc_srcsel[9][8];   // per phase: source nibble 0..15
+EWRAM_BSS static u32 sc_ph_m[9][4];     // v30 mask-combine: per phase,
+EWRAM_BSS static u8  sc_ph_q4[9];       // masks for off 0..-3 + 4*sel[0]
 EWRAM_BSS static u8  sc_vdelta[161];
 EWRAM_BSS static u16 sc_vtab0[161];
 EWRAM_BSS static u16 sc_vtab1[161];
@@ -80,6 +82,11 @@ static volatile u8 sc_busy;         // menu-sync vs vblank reentry guard
 // (game paused, overrun invisible).
 static int sc_budget;
 static u8 sc_menu_build;
+static u8 sc_timed;       // v30: budget is time-gated (stop when scanout
+                          // passes SC_DEADLINE_LINE), not count-gated
+#define SC_DEADLINE_LINE 45
+#define SC_TIME_UP() (sc_timed && \
+	((*(vu16*)0x4000006) >= SC_DEADLINE_LINE && (*(vu16*)0x4000006) < 160))
 static u8 sc_wst_cur;     // debounced window state: 0x80|wtop, 0 = off.
 static u8 sc_wst_pend;    // games move WX/WY mid-frame; our once-per-
 static u8 sc_wst_cnt;     // vblank sample flip-flops without debounce
@@ -107,26 +114,39 @@ static void sc_build_tables(void)
 			int s0=(8*p*sc_D)/sc_N;
 			sc_srcsel[p][x] = (u8)(((8*p+x)*sc_D)/sc_N - (s0&~7));
 		}
+	for(p=0;p<sc_N;p++)
+	{	// v30 mask-combine constants: sel[] ascends from q with only
+		// repeats (rate 8/9 or 2/3), so output x shows source nibble
+		// x+q-off with off in 0..3 -> four fixed masks per phase
+		int q=sc_srcsel[p][0];
+		sc_ph_q4[p]=(u8)(q*4);
+		for(x=0;x<4;x++) sc_ph_m[p][x]=0;
+		for(x=0;x<8;x++)
+		{
+			int off = x + q - sc_srcsel[p][x];
+			sc_ph_m[p][off] |= 0xFu<<(x*4);
+		}
+	}
 }
 
 // Convert one output tile: pair (a,b) at phase p -> 8 rows of 8 nibbles
 // picked from the 16-nibble source pair rows, pixel values shifted to 1..4.
 static void sc_convert_cell(const u8 *ta,const u8 *tb,int p,u32 *dst)
 {
-	const u8 *sel=sc_srcsel[p];
-	int r,x;
+	// v30 mask-combine: build the 8-nibble source string v starting at
+	// nibble q, then place each output from v/v<<4/v<<8/v<<12 by the
+	// per-phase masks. ~10 ops/row vs the old per-pixel loop.
+	u32 q4=sc_ph_q4[p];
+	u32 m0=sc_ph_m[p][0],m1=sc_ph_m[p][1];
+	u32 m2=sc_ph_m[p][2],m3=sc_ph_m[p][3];
+	int r;
 	for(r=0;r<8;r++)
 	{
-		u32 ra = sc_nib[ta[r*2]] | (sc_nib[ta[r*2+1]]<<1);
-		u32 rb = sc_nib[tb[r*2]] | (sc_nib[tb[r*2+1]]<<1);
-		u32 o=0;
-		for(x=0;x<8;x++)
-		{
-			int s=sel[x];
-			u32 n = (s<8) ? (ra>>(s*4)) : (rb>>((s-8)*4));
-			o |= (n&0xF)<<(x*4);
-		}
-		dst[r] = o + 0x11111111;
+		u32 v = sc_nib[ta[r*2]] | (sc_nib[ta[r*2+1]]<<1);
+		if(q4)
+			v = (v>>q4) | ((sc_nib[tb[r*2]] | (sc_nib[tb[r*2+1]]<<1))<<(32-q4));
+		dst[r] = ((v&m0) | ((v<<4)&m1) | ((v<<8)&m2) | ((v<<12)&m3))
+		         + 0x11111111;
 	}
 }
 
@@ -220,6 +240,7 @@ static u32 sc_lookup(u32 a,u32 b,u32 p)
 		h=(h+1)&(HASH_SIZE-1);
 	}
 	if(sc_budget<=0) return 0;      // out of frame budget: caller retries
+	if(SC_TIME_UP()) { sc_budget=0; return 0; }
 	c=sc_alloc_cell();
 	if(c>=MAX_TILES) return 0;      // cache full: RETRY too - hidden rows
 	                                // age past the eviction threshold in
@@ -267,8 +288,8 @@ static void sc_update_dirty(void)
 	// OBJ tiles first, on their OWN budget: OAM may already reference the
 	// new tile index this frame, so a deferred OBJ convert = torn sprite.
 	{
-		int obudget=24;
-		while(sc_sweep_obj<128 && obudget>0)
+		int obudget=64;               // v30: conversions are cheap now
+		while(sc_sweep_obj<128 && obudget>0 && !SC_TIME_UP())
 		{
 			u32 t=sc_sweep_obj*2;
 			sc_sweep_obj++;
@@ -284,11 +305,24 @@ static void sc_update_dirty(void)
 	{
 		u32 key=sc_cell_key[sc_sweep_cell], a, b;
 		a=(key>>15)&0x1FF; b=(key>>6)&0x1FF;
-		if(TILE_DIRTY(a) || TILE_DIRTY(b))
+		if(key && (TILE_DIRTY(a) || TILE_DIRTY(b)))
 		{
-			sc_convert_cell(XGB_VRAM+a*16, XGB_VRAM+b*16, key&0xF,
-				sc_cell_vram(sc_sweep_cell));
-			sc_budget--;
+			if((u8)(sc_gen - sc_cell_gen[sc_sweep_cell]) > 8)
+			{	// v30 visible-first: a dirty cell nobody stamped within
+				// the 8-frame rotation isn't on screen - evict it instead
+				// of paying a reconvert (tile-streaming games invalidate
+				// far more cache than they display)
+				sc_hash_del(key);
+				sc_cell_key[sc_sweep_cell]=0;
+				sc_cell_gen[sc_sweep_cell]=(u8)(sc_gen-64);
+			}
+			else
+			{
+				sc_convert_cell(XGB_VRAM+a*16, XGB_VRAM+b*16, key&0xF,
+					sc_cell_vram(sc_sweep_cell));
+				sc_budget--;
+				if(SC_TIME_UP()) sc_budget=0;
+			}
 		}
 		sc_sweep_cell++;
 	}
@@ -484,7 +518,11 @@ void scaling_scaled_frame(void)
 	}
 
 	// ---- PHASE B: budgeted build work (may run past vblank safely) ----
-	sc_budget = sc_menu_build ? 0x7FFFFFFF : 64;
+	// v30: the real limit is time (SC_TIME_UP in the convert paths); the
+	// count is a runaway backstop. Old fixed 64 starved tile-streaming
+	// games into multi-frame stale cells.
+	sc_budget = sc_menu_build ? 0x7FFFFFFF : 4096;
+	sc_timed  = !sc_menu_build;
 	sc_menu_build = 0;
 	if(!sc_active)
 	{

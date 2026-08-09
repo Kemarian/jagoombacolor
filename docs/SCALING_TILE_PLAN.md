@@ -459,3 +459,43 @@ ghost bars 3-4f after the GB window is gone; 8f bar-return dropout;
 5f stale lead-row text; NEW close-start overshoot ~5px/3f = undebounced
 wsub leading debounced wtop on WY reversal (the documented trade-off,
 now measured). All queued under the P3 WIN0-split window rework.
+
+## v30 PLAN - converter performance rework (dynamic-game class)
+
+Target: Batman / TMNT / Ninja Gaiden-class games (continuous scroll +
+tile streaming) currently "slow and glitchy" = conversion budget
+saturation. Test game switches to Batman (JU) - Catrap/Tetris stay as
+regression only (already near-perfect; Balloon Kid too glitchy to be a
+useful progress signal).
+
+Reconnaissance facts:
+- IWRAM is FULL (.iwram 0x78C0/0x8000 + stack at top) - the planned
+  "IWRAM ARM converter" does NOT fit. Replaced by an algorithmic rework
+  that wins anywhere it runs.
+- WAITCNT is never programmed = power-on 4/2 ROM waits, prefetch OFF.
+  Standard 3,1+prefetch (0x4317) nearly doubles sequential ROM code -
+  the whole emulator benefits, not just scaling. mGBA models this.
+
+v30 batch:
+1. WAITCNT=0x4317 at boot (3,1 ROM waits + prefetch). Global speedup.
+2. Mask-combine converter: replace the per-pixel variable-shift loop
+   (~100+ ops/row) with the nibble-string identity: an output row is the
+   16-nibble source pair string starting at nibble q with 0-2 duplicated
+   positions -> v = (ra>>4q)|(rb<<(32-4q)); o = (v&m0)|((v<<4)&m1)|
+   ((v<<8)&m2) + 0x11111111. m0-m2,q precomputed per (mode,phase) in
+   sc_build_tables. ~10 ops/row, both 9/8 and 3/2 modes. ~5-10x/cell.
+3. VCOUNT time budget: sc_budget becomes effectively unlimited; the
+   convert path stops when scanout passes line 45 (work window = vblank
+   + 45 lines ~= 50K cycles more than today, and the fast converter
+   turns that into ~hundreds of cells/frame vs 64). Menu build stays
+   unbounded. Temporary burst slowdown replaces multi-frame stale cells.
+4. Visible-first sweep: dirty cells not stamped within 8 gens (not
+   displayed) are EVICTED, not reconverted - tile-streaming storms only
+   pay for cells actually on screen.
+5. OBJ sweep budget raised (conversions now cheap).
+
+Risks: WAITCNT on EZ-Omega-DE hardware (PSRAM should take 3,1; revert
+switch if hardware disagrees - mGBA proxy unaffected); mask-combine
+correctness vs old converter (verify: Catrap settled menu must stay
+SAD=0 vs v29 captures); VCOUNT budget stealing GB-core time on burst
+frames (acceptable by design: stale beats torn, slow beats stale).
