@@ -53,6 +53,8 @@
 @BUILD		SETS "DEBUG"/"GBA"	(defined at cmdline)
 @----------------------------------------------------------------------------
 
+@SCALING_DEBUG comes from config.h (this file is cpp-preprocessed)
+
 MAX_RECENT_TILES = 96  @if you change this, change RECENT_TILES as well!
 RECENT_TILENUM_SIZE = 128
 
