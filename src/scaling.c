@@ -287,7 +287,9 @@ static void sc_update_dirty(void)
 		sc_sweep_active=1;
 		sc_sweep_obj=0;
 		sc_sweep_cell=0;
+#if SCALING_DEBUG
 		*(vu16*)0x05000000 = 0x7C1F;   // CAUSE DEBUG: magenta = sweep restart
+#endif
 	}
 	if(!sc_sweep_active) return;
 
@@ -416,7 +418,9 @@ void scaling_scaled_frame(void)
 		return;
 	}
 	sc_busy=1;
+#if SCALING_DEBUG
 	*(vu16*)0x05000000 = 0x001F;   // TIMING DEBUG: red while building
+#endif
 
 	// ---- PHASE A: display programming, guaranteed early ----
 	fit = (g_scale_mode==SCALE_FIT);
@@ -582,8 +586,10 @@ void scaling_scaled_frame(void)
 		// left the window and must be transparent).
 		int i, lim = wenable ? wtop : 18;
 		vu16 *m=WIN_MAP;
+#if SCALING_DEBUG
 		*(vu16*)0x05000000 = 0x7C00;   // CAUSE DEBUG: blue = lcdc/window
 		                               // change -> full row invalidation
+#endif
 		for(i=0;i<lim*32;i++) m[i]=blank;
 		for(i=0;i<18;i++) sc_wbuilt[i]=0;
 		// BG rows hidden behind the window aren't stamped and may have
@@ -715,8 +721,10 @@ void scaling_fix_oam(void)
 	vu16 *oam=(vu16*)0x07000000;
 	int i;
 	int ysh = (lcdctrl0frame_ & 0x04) ? 8 : 4;
-	*(vu16*)0x05000000 = 0x03E0;   // TIMING DEBUG: green during OAM pass
 	int fit = (g_scale_mode==SCALE_FIT);
+#if SCALING_DEBUG
+	*(vu16*)0x05000000 = 0x03E0;   // TIMING DEBUG: green during OAM pass
+#endif
 	u16 pa = fit ? 227 : 170;                  // 256*8/9 / 256*2/3
 	u16 pd = 227;                              // v29: was 230 (256*9/10).
 	// Stacked 8px OBJ units sit 9px apart after 10/9 rounding, but PD=230

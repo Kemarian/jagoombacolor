@@ -7,7 +7,14 @@
 #define SRAM_SIZE 64
 #endif
 
-#define VERSION "v0.6-k2"
+#define VERSION "v0.6.1-k3"
+
+//Scaling-development instrumentation: colored letterbox bars showing
+//builder timing/cause (red=build, blue=lcdc invalidation, magenta=sweep
+//restart, green=OAM pass) and a hardcoded Metroid DMG palette for
+//hue-separable layer forensics in GIF captures. Reaches the .s files too
+//(equates.h is cpp-preprocessed and includes this header).
+#define SCALING_DEBUG 0
 
 //#define LITTLESOUNDDJ 0
 //Little Sound DJ Hack requires M3/G6/Supercard

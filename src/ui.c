@@ -329,7 +329,11 @@ char *const brightxt[]={"I","II","III","IIII","IIIII"};
 char *const hostname[]={"Crap","Prot","GBA","GBP","NDS"};
 char *const ctrltxt[]={"1P","2P","Link2P","Link3P","Link4P"};
 char *const bordtxt[]={"Black","Grey","Blue","None"};
+#if SCALING_DEBUG
 char *const scaletxt[]={"Off","Fit v31dbg","Stretch v31dbg"};
+#else
+char *const scaletxt[]={"Off","Fit","Stretch"};
+#endif
 char *const paltxt[]=
 {
 "Pea Soup",
