@@ -534,3 +534,25 @@ v31 batch:
    with flip-aware invalidation (dirty-driven instead of nuke-all).
 3. Evictions in the sweep get time-gate + per-frame cap (v30 oversight:
    ungated eviction storm can tombstone-degrade the hash).
+
+## v31 forensics -> v32 (2026-08-09)
+
+v31 verified: HUD PINNED, zero jitter, seam-clean split (rows 0..16).
+Two failures root-caused by the cause-colored bars + startup dissection:
+
+1. TITLE SPIN (startup "blinking"): Batman's emblem spin is a per-line
+   SCY raster effect on a STATIC map holding emblem+wordmark stacked
+   (proved: squash frames = exact row-copies, back faces = exact
+   vertical mirrors; zero tile writes, borders black = engine idle).
+   The 2-band model rendered the base-scroll view = the wordmark, 93%
+   of the 26s spin. v32: vquad fills PER-LINE from the captured scroll
+   table (VOFS(y) = scyL[y-delta]-delta[y], HOFS likewise); viewport
+   builds the row set the table actually touches. Two-band special case
+   deleted - the general path is simpler.
+2. 4Hz STALL: RED (raw build), NOT lcdc/blue. Cache at capacity; alloc
+   reclaims only age>16 cells; entering columns wait out the age gate =
+   15-frame stall trains (FFT 3.98Hz), plus once-per-train 55%-red
+   blinks and the 4Hz SCORE black-box (rebuild latency). v32: two-pass
+   alloc (age>16 then age>8 - stamps re-mark displayed cells within 8
+   frames, so >8 is safe). Expect stall trains gone; ~8% speed deficit
+   should shrink with them.

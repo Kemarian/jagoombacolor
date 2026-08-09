@@ -75,8 +75,7 @@ EWRAM_BSS static u16 sc_row_c0[32]; // per BG row: C0 the row was built for
                                     // so scrolling reuses all cells and
                                     // only entering columns get built.
 static u16 sc_ncells, sc_tombs, sc_evict_ptr;
-static u32 sc_bt0=0xFFFFFFFF;       // v31: vquad rebuild tuples -
-static u32 sc_bt1;                  // {scx,scy,wsub,split} {scx2,scy2,fit}
+// (v32: vquad rebuilds every frame from the per-line capture - no tuple)
 static u8 sc_gen, sc_tables_ok, sc_active, sc_last_lcdc, sc_last_wy;
 static u8 sc_N, sc_D;               // current ratio (9/8 or 3/2)
 static volatile u8 sc_busy;         // menu-sync vs vblank reentry guard
@@ -177,7 +176,6 @@ static void sc_full_reset(void)
 	for(i=0;i<18;i++) sc_wbuilt[i]=0;
 	for(i=0;i<32;i++) sc_row_c0[i]=0xFFFF;
 	sc_ncells=0; sc_tombs=0; sc_evict_ptr=0;
-	sc_bt0=0xFFFFFFFF;
 	for(i=0;i<8;i++) bt[i]=0;
 	m=SCALED_MAP; for(i=0;i<0x800;i++) m[i]=blank;   // both blocks (64x32)
 	m=WIN_MAP;    for(i=0;i<0x400;i++) m[i]=blank;
@@ -209,17 +207,25 @@ static void sc_hash_del(u32 key)
 
 static u32 sc_alloc_cell(void)
 {
-	int n;
+	int n,pass;
 	if(sc_ncells<MAX_TILES) return sc_ncells++;
-	for(n=0;n<MAX_TILES;n++)
+	// v32 two-pass: gentle first (age>16), then age>8. The stamp rotation
+	// re-marks every DISPLAYED cell within 8 frames, so age>8 is safe to
+	// take. v31's single >16 gate made a full cache wait out the age
+	// quantum for every entering scroll column = the 4Hz stall trains
+	// (15-frame period == the eviction age, confirmed by capture FFT).
+	for(pass=0;pass<2;pass++)
 	{
-		u32 c=sc_evict_ptr;
-		sc_evict_ptr = (sc_evict_ptr+1)==MAX_TILES ? 0 : sc_evict_ptr+1;
-		// stamps rotate over 8 frames now: only evict clearly old cells
-		if((u8)(sc_gen - sc_cell_gen[c]) > 16)
+		u8 lim = pass ? 8 : 16;
+		for(n=0;n<MAX_TILES;n++)
 		{
-			sc_hash_del(sc_cell_key[c]);
-			return c;
+			u32 c=sc_evict_ptr;
+			sc_evict_ptr = (sc_evict_ptr+1)==MAX_TILES ? 0 : sc_evict_ptr+1;
+			if((u8)(sc_gen - sc_cell_gen[c]) > lim)
+			{
+				sc_hash_del(sc_cell_key[c]);
+				return c;
+			}
 		}
 	}
 	return MAX_TILES;
@@ -389,10 +395,10 @@ void scaling_scaled_frame(void)
 	u8 lcdc;
 	const u8 *gbmap, *wmap;
 	u8 *wdirty, *mdirty;
-	int mode8000,r,j,scy,scx;
+	int mode8000,r,j;
 	int wenable,wtop,fit;
-	int P,C0,phase,ccols,ncontent,guardL,guardR;
-	int split,scx2,scy2,bi;
+	int ccols,ncontent,guardL,guardR;
+	u32 *sb;
 	u16 dispcnt, blank;
 
 	if(sc_busy)
@@ -435,33 +441,16 @@ void scaling_scaled_frame(void)
 	if(!sc_tables_ok) { sc_build_tables(); sc_tables_ok=1; }
 
 	lcdc = lcdctrl0frame_;
-	scy = scrollY; scx = scrollX;
 	ccols = (32*sc_N)/sc_D;                    // 36 (fit) / 48 (stretch)
 	ncontent = fit ? 24 : 31;
 	guardL   = fit ? 4  : 0;
 	guardR   = fit ? 5  : 1;
-	{	// v31: raster-split detection from the per-line capture the GB
-		// core fills for the normal renderer's scanline DMA. Batman-class
-		// games keep the HUD in the BG map and reload SCX/SCY at a fixed
-		// scanline; one sampled scroll made the HUD ride the world.
-		// (xyscroll word: (scy-8)<<16 | (scx-40), 6 words per GB line.)
-		u32 *sb=(u32*)_bigbufferbase2;
-		u32 v0=sb[2], v; int i;
-		split=0; scx2=scx; scy2=scy;
-		for(i=1;i<144;i++)
-			if((v=sb[i*6+2])!=v0)
-			{
-				split=i;
-				scx2=(int)((v+40)&0xFF);
-				scy2=(int)(((v>>16)+8)&0xFF);
-				break;
-			}
-		scx=(int)((v0+40)&0xFF);
-		scy=(int)(((v0>>16)+8)&0xFF);
-	}
-	P  = (scx*sc_N)/sc_D;
-	C0 = P>>3;
-	phase = P&7;
+	// v32: full per-line scroll from the capture the GB core fills for
+	// the normal renderer's scanline DMA (xyscroll word per GB line:
+	// (scy-8)<<16 | (scx-40), 6-word stride). v31's two-band model
+	// couldn't express Batman's title spin = a different SCY on nearly
+	// every scanline of a static map.
+	sb=(u32*)_bigbufferbase2;
 	{	// window state with 3-frame debounce (mid-frame WX/WY tricks make
 		// the raw per-vblank sample oscillate)
 		int rawen = (lcdc&0x20) && windowY<144 && windowX<8;
@@ -477,29 +466,24 @@ void scaling_scaled_frame(void)
 		wtop = sc_wst_cur & 0x1F;
 	}
 
-	{	// vquad rebuild: per-line {HOFS0,VOFS0,HOFS1,VOFS1}. Vertical =
-		// scy_band - delta[y] (v29 wsub folds the window's sub-tile seat
-		// into VOFS1); horizontal per band because a raster split can
-		// carry a different SCX above/below the split line.
+	{	// vquad fill: per-line {HOFS0,VOFS0,HOFS1,VOFS1} straight from the
+		// captured table. Output line y shows source GB line g=y-delta[y];
+		// the game wanted map line scyL[g]+g there, so VOFS(y) =
+		// scyL[g]-delta[y]. Rebuilt every frame (160 iterations, cheap).
+		// VOFS1 keeps the v29 wsub sub-tile window seat.
+		int y, xb=fit?30:0;
 		int wsub = wenable ? (windowY&7) : 0;
-		u32 bt0 = (u32)scx | ((u32)scy<<8) | ((u32)wsub<<16) | ((u32)split<<24);
-		u32 bt1 = (u32)scx2 | ((u32)scy2<<8) | (fit?0x80000000u:0);
-		if(bt0!=sc_bt0 || bt1!=sc_bt1)
+		u16 h1=(u16)((0-xb)&0x1FF);
+		for(y=0;y<161;y++)
 		{
-			int y, xb=fit?30:0;
-			int ysplit = split ? (split*10+8)/9 : 999;
-			u16 hA=(u16)(((scx *sc_N)/sc_D - xb)&0x1FF);
-			u16 hB=(u16)(((scx2*sc_N)/sc_D - xb)&0x1FF);
-			u16 h1=(u16)((0-xb)&0x1FF);
-			for(y=0;y<161;y++)
-			{
-				int A=(y<ysplit);
-				sc_vquad[y][0]= A?hA:hB;
-				sc_vquad[y][1]=(u16)(((A?scy:scy2)-sc_vdelta[y])&0xFF);
-				sc_vquad[y][2]= h1;
-				sc_vquad[y][3]=(u16)((0-sc_vdelta[y]-wsub)&0xFF);
-			}
-			sc_bt0=bt0; sc_bt1=bt1;
+			int g=y-sc_vdelta[y];
+			u32 v;
+			if(g>143) g=143;
+			v=sb[g*6+2];
+			sc_vquad[y][0]=(u16)(((((v+40)&0xFF)*sc_N)/sc_D - xb)&0x1FF);
+			sc_vquad[y][1]=(u16)((((v>>16)+8) - sc_vdelta[y])&0xFF);
+			sc_vquad[y][2]=h1;
+			sc_vquad[y][3]=(u16)((0-sc_vdelta[y]-wsub)&0xFF);
 		}
 	}
 
@@ -611,28 +595,40 @@ void scaling_scaled_frame(void)
 		for(i=0;i<8;i++) bt[i]=0;
 	}
 
-	// ---- BG0 ring viewport (v31: one pass per raster-split band; the
-	// playfield band builds first so the HUD band wins if the wrapped
-	// playfield ever touches the HUD's map rows) ----
-	for(bi = split?1:0; bi>=0; bi--)
+	// ---- BG0 ring viewport (v32: build exactly the map rows the
+	// per-line table displays this frame; per-line effects like the
+	// Batman title spin touch many rows, all resolved by cache hits
+	// after the first frame since the map content is static) ----
 	{
-		int blo  = bi ? split : 0;
-		int bhi  = (split && !bi) ? split-1 : 143;
-		int bscx = bi ? scx2 : scx;
-		int bscy = bi ? scy2 : scy;
-		int P_   = (bscx*sc_N)/sc_D;
-		int C0_  = P_>>3;
-		int rlo  = (bscy+blo)>>3, rhi=(bscy+bhi)>>3, rr;
-		for(rr=rlo;rr<=rhi;rr++)
+		u32 rowmask=0;
+		u8 rowscx[32], rowy[32];
+		int y;
+		for(y=0;y<160;y++)
 		{
-			int mr=rr&31;
+			int g=y-sc_vdelta[y];
+			u32 v=sb[g*6+2];
+			int mr=(((int)(((v>>16)+8)&0xFF)+g)>>3)&31;
+			if(!((rowmask>>mr)&1))
+			{
+				rowmask|=1u<<mr;
+				rowscx[mr]=(u8)((v+40)&0xFF);
+				rowy[mr]=(u8)y;
+			}
+		}
+		for(r=0;r<32;r++)
+		{
+			int mr=r;
+			int P_,C0_;
 			const u8 *mrow;
 			u16 st;
+			if(!((rowmask>>mr)&1)) continue;
 			if(wenable)
-			{	// rows fully hidden behind the window: don't build
-				int g0=(rr*8-bscy)&0xFF;
-				if(g0>wtop*8+8 && g0<160) continue;
+			{	// rows first shown below the window top: hidden, skip
+				int ywin=((wtop*8)*10)/9;
+				if(rowy[mr] > ywin+9) continue;
 			}
+			P_=(rowscx[mr]*sc_N)/sc_D;
+			C0_=P_>>3;
 			st = sc_row_c0[mr];
 			if(mdirty[mr]) { st=0xFFFF; sc_row_c0[mr]=0xFFFF; }
 			// (persist the invalidation NOW: if the rebuild below runs out
