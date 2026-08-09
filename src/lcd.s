@@ -95,6 +95,7 @@
 	.global ui_border_screen
 	.global ui_border_request
 	.global VRAM_chr_lastAddr
+	.global _bigbufferbase2	@v31: scaled mode reads the per-line scroll capture
 	.global lcdctrl0frame_
 	.global ui_y_real
 	.global ui_x
