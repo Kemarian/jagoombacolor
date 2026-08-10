@@ -1,6 +1,6 @@
 @----------------------------------------------------------------------------
 @ scaling.s - tile-domain 1.5x scaling for Jagoomba Color
-@ Design: spec/SCALING_TILE_PLAN.md
+@ (design journal maintained outside this repo)
 @
 @ Phase 0 (current): clean toggle support only.
 @   scaling_restore - full rebuild of tiles + BG maps, called from the UI

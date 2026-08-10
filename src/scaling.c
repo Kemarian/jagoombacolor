@@ -1,5 +1,5 @@
 // scaling.c - tile-domain fractional scaling for jagoombacolor.
-// Design + journal: docs/SCALING_TILE_PLAN.md
+// (design journal maintained outside this repo)
 //
 // v14: generic N/D horizontal ratio engine (one output tile = one cache
 // cell keyed on source tile pair + phase), replacing the 1.5x-only
