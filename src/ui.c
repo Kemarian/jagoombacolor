@@ -159,6 +159,8 @@ void ui()
 
 	main_ui_selection = 0;
 	make_ui_visible();
+	loadfontpal();	//v33: scaled mode owns BG palette rows 0-7, which
+					//includes the font rows (5-6) - reload on menu entry
 
 	autoA=joycfg&A_BTN?0:1;
 	autoA|=joycfg&(A_BTN<<16)?0:2;
@@ -330,7 +332,7 @@ char *const hostname[]={"Crap","Prot","GBA","GBP","NDS"};
 char *const ctrltxt[]={"1P","2P","Link2P","Link3P","Link4P"};
 char *const bordtxt[]={"Black","Grey","Blue","None"};
 #if SCALING_DEBUG
-char *const scaletxt[]={"Off","Fit v33dbg","Stretch v33dbg"};
+char *const scaletxt[]={"Off","Fit v34dbg","Stretch v34dbg"};
 #else
 char *const scaletxt[]={"Off","Fit","Stretch"};
 #endif
@@ -814,6 +816,7 @@ void changescale()
 		//still left fonts broken - state was re-touched between this call
 		//and game resume; after resume nothing runs ahead of the rebuild.
 		g_restore_pending=1;
+		loadfontpal();	//v33: rows 5-6 held GBC palette values
 		*(vu16*)0x4000208=ime;
 	}
 	else

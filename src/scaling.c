@@ -66,6 +66,9 @@ EWRAM_BSS static u8  sc_mapdirty[64];   // per-frame snapshot of the map
 EWRAM_BSS static u8  sc_srcsel[9][8];   // per phase: source nibble 0..15
 EWRAM_BSS static u32 sc_ph_m[9][4];     // v30 mask-combine: per phase,
 EWRAM_BSS static u8  sc_ph_q4[9];       // masks for off 0..-3 + 4*sel[0]
+EWRAM_BSS static u8  sc_ph_bdom[9];     // v34: tile B contributes most of
+                                        // this phase's pixels - use B's
+                                        // palette attr for the cell
 EWRAM_BSS static u8  sc_vdelta[161];
 EWRAM_BSS static u16 sc_vquad[161][4]; // v31: per-line {BG0HOFS,BG0VOFS,
                                        // BG1HOFS,BG1VOFS} DMA0 stream -
@@ -102,6 +105,11 @@ static u8 sc_wst_cur;     // debounced window state: 0x80|wtop, 0 = off.
 static u8 sc_wst_pend;    // games move WX/WY mid-frame; our once-per-
 static u8 sc_wst_cnt;     // vblank sample flip-flops without debounce
 static u8 sc_sweep_active;          // dirty-reconvert sweep in progress
+static u8 sc_sweep_wrap;            // v34: merge arrived mid-pass - do one
+                                    // more full pass instead of restarting
+                                    // (restart-per-merge starved the
+                                    // viewport forever in tile-animating
+                                    // games = the LADX post-load freeze)
 static u16 sc_sweep_obj;            // next OBJ tile pair (0..128)
 static u16 sc_sweep_cell;           // next cache cell
 
@@ -135,13 +143,16 @@ static void sc_build_tables(void)
 		// repeats (rate 8/9 or 2/3), so output x shows source nibble
 		// x+q-off with off in 0..3 -> four fixed masks per phase
 		int q=sc_srcsel[p][0];
+		int nb_=0;
 		sc_ph_q4[p]=(u8)(q*4);
 		for(x=0;x<4;x++) sc_ph_m[p][x]=0;
 		for(x=0;x<8;x++)
 		{
 			int off = x + q - sc_srcsel[p][x];
 			sc_ph_m[p][off] |= 0xFu<<(x*4);
+			if(sc_srcsel[p][x]>=8) nb_++;
 		}
+		sc_ph_bdom[p]=(u8)(nb_>4);
 	}
 }
 
@@ -310,12 +321,12 @@ static void sc_update_dirty(void)
 		if(d) { sc_dirty_snap[i]|=d; acc|=d; DIRTY_TILE_BITS[i]=0; }
 	}
 	if(acc)
-	{	// v26: RESTART the sweep on any merge - a one-shot write landing
-		// behind an active sweep's cursor was silently lost until eviction
+	{	// v34: a write behind an active cursor is caught by ONE wrap pass
+		// at the end instead of restarting the cursor (v26's restart made
+		// the sweep O(cache) per animation tick and starved the viewport)
 		VRAM_chr_lastAddr=0xFF;
-		sc_sweep_active=1;
-		sc_sweep_obj=0;
-		sc_sweep_cell=0;
+		if(sc_sweep_active) sc_sweep_wrap=1;
+		else { sc_sweep_active=1; sc_sweep_obj=0; sc_sweep_cell=0; }
 #if SCALING_DEBUG
 		*(vu16*)0x05000000 = 0x7C1F;   // CAUSE DEBUG: magenta = sweep restart
 #endif
@@ -338,6 +349,16 @@ static void sc_update_dirty(void)
 			obudget--;
 		}
 	}
+}
+
+// v34: cell reconversion runs AFTER the viewport/window builds - the
+// visible rows must always get conversion budget first (the sweep used
+// to run first and, kept alive by tile animations, starved the display
+// into a permanent stale freeze after big uploads)
+static void sc_sweep_cells(void)
+{
+	int i;
+	if(!sc_sweep_active) return;
 	while(sc_sweep_cell<sc_ncells && sc_budget>0)
 	{
 		u32 key=sc_cell_key[sc_sweep_cell], a, b;
@@ -369,9 +390,19 @@ static void sc_update_dirty(void)
 		sc_sweep_cell++;
 	}
 	if(sc_sweep_obj>=128 && sc_sweep_cell>=sc_ncells)
-	{	// sweep complete: everything converted from current tile data
-		sc_sweep_active=0;
-		for(i=0;i<12;i++) sc_dirty_snap[i]=0;
+	{
+		if(sc_sweep_wrap)
+		{	// merges arrived mid-pass: one more pass covers anything the
+			// cursor had already passed when its tiles went dirty
+			sc_sweep_wrap=0;
+			sc_sweep_obj=0;
+			sc_sweep_cell=0;
+		}
+		else
+		{	// sweep complete: everything converted from current tile data
+			sc_sweep_active=0;
+			for(i=0;i<12;i++) sc_dirty_snap[i]=0;
+		}
 	}
 }
 
@@ -403,7 +434,10 @@ static u16 sc_cell_entry(const u8 *mrow,int C,int mode8000,int ccols)
 	{
 		u32 t=sc_lookup(a,b,p,f);
 		if(!t) return 0;            // budget exhausted: retry next frame
-		return (u16)(t | ((aa&7)<<12));
+		// v34: the cell's palette comes from whichever tile contributes
+		// the majority of its pixels (A-always painted B-dominated cells
+		// in A's palette = the wrong-palette column stripes)
+		return (u16)(t | (((sc_ph_bdom[p]?ab:aa)&7)<<12));
 	}
 }
 
@@ -755,6 +789,8 @@ void scaling_scaled_frame(void)
 			}
 		}
 	}
+
+	sc_sweep_cells();              // v34: leftover budget only
 
 	*(vu16*)0x05000000 = 0;        // TIMING DEBUG: work done -> black
 	sc_busy=0;

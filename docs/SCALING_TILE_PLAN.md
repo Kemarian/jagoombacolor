@@ -580,3 +580,26 @@ v33: full GBC BG attribute support.
 - Attr reads: attr map = same offsets +0x2000 (VRAM bank1); attr writes
   already set dirty_map_words (verified bank-agnostic) so attr changes
   invalidate rows for free. gbc_mode gates it all; DMG unchanged.
+
+## v33 forensics -> v34 (2026-08-10)
+
+LADX v33 verdicts (10989-frame dissection): bank/flip keying and
+geometry SOUND (dark room pixel-perfect 0.74/255; zero wrong-art cells);
+three real bugs, all fixed in v34:
+1. POST-LOAD FREEZE (unplayable): file-load = full VRAM/attr upload ->
+   dirty sweep restarts on EVERY merge (v26 rule) while LADX's tile
+   animations merge constantly -> sweep O(cache) per tick ran first and
+   ate the whole time budget every frame -> viewport starved, screen
+   frozen on stale file-select art for 1890 frames (magenta strobe,
+   content diff 0.00). v34: viewport builds FIRST (sweep gets leftover
+   budget only, split sc_sweep_cells) + sweep wraps once on mid-pass
+   merges instead of restarting (bounded 2 passes per burst).
+2. BROWN MENU FONTS: GBA BG rows 5-6 = UI font palette, inside our GBC
+   rows 0-7; exact color match to pots-room palette proved residue.
+   v34: loadfontpal() on menu entry and on scaling toggle-off.
+3. WRONG-PALETTE COLUMN STRIPES (phase-linked, whole columns, palettes
+   from non-adjacent tiles): cells whose pixels are mostly tile B were
+   painted with tile A's palette. v34: per-phase majority-tile palette
+   selection (sc_ph_bdom from srcsel).
+Left open: title-entry garbage window (~4.5s, converges), room-entry
+OBJ-palette lag (~23 frames), mast-cutscene scaling dropout.
