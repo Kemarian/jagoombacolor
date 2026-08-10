@@ -104,6 +104,12 @@ static u8 sc_timed;       // v30: budget is time-gated (stop when scanout
 static u8 sc_wst_cur;     // debounced window state: 0x80|wtop, 0 = off.
 static u8 sc_wst_pend;    // games move WX/WY mid-frame; our once-per-
 static u8 sc_wst_cnt;     // vblank sample flip-flops without debounce
+#if SCALING_DEBUG
+EWRAM_BSS static u32 sc_varbits[1024]; // v35 P1: 32768-bit map of visible
+                                       // (tile+bank,pal,flips) variants
+static u32 sc_pairbits[2];             // ordered mixed (palA,palB) pairs
+static u16 sc_prio_cnt;                // attr-bit7 positions this frame
+#endif
 static u8 sc_sweep_active;          // dirty-reconvert sweep in progress
 static u8 sc_sweep_wrap;            // v34: merge arrived mid-pass - do one
                                     // more full pass instead of restarting
@@ -337,16 +343,27 @@ static void sc_update_dirty(void)
 	// new tile index this frame, so a deferred OBJ convert = torn sprite.
 	{
 		int obudget=64;               // v30: conversions are cheap now
-		while(sc_sweep_obj<128 && obudget>0 && !SC_TIME_UP())
+		while(sc_sweep_obj<128 && obudget>0 && sc_budget>0)
 		{
 			u32 t=sc_sweep_obj*2;
+			// v35: test EACH bank's dirty bit (bank-1 writes set bits at
+			// id+384; testing only bank 0 left bank-1 sprite pixels stale
+			// = the LADX Link split and the room-entry "palette lag")
+			int d0=TILE_DIRTY(t), d1=TILE_DIRTY(t+384);
 			sc_sweep_obj++;
-			if(!TILE_DIRTY(t)) continue;
-			sc_convert_obj(XGB_VRAM+t*16,           (u32*)(OBJ_TILES+t*32));
-			sc_convert_obj(XGB_VRAM+(t+1)*16,       (u32*)(OBJ_TILES+(t+1)*32));
-			sc_convert_obj(XGB_VRAM+0x2000+t*16,    (u32*)(OBJ_TILES+0x2000+t*32));
-			sc_convert_obj(XGB_VRAM+0x2000+(t+1)*16,(u32*)(OBJ_TILES+0x2000+(t+1)*32));
+			if(!(d0|d1)) continue;
+			if(d0)
+			{
+				sc_convert_obj(XGB_VRAM+t*16,        (u32*)(OBJ_TILES+t*32));
+				sc_convert_obj(XGB_VRAM+(t+1)*16,    (u32*)(OBJ_TILES+(t+1)*32));
+			}
+			if(d1)
+			{
+				sc_convert_obj(XGB_VRAM+0x2000+t*16,    (u32*)(OBJ_TILES+0x2000+t*32));
+				sc_convert_obj(XGB_VRAM+0x2000+(t+1)*16,(u32*)(OBJ_TILES+0x2000+(t+1)*32));
+			}
 			obudget--;
+			if(SC_TIME_UP()) sc_budget=0;   // v35: sticky deadline
 		}
 	}
 }
@@ -406,6 +423,37 @@ static void sc_sweep_cells(void)
 	}
 }
 
+#if SCALING_DEBUG
+// v35 P1: harvest the direction-F decision counters from every VISIBLE
+// source position (called from the viewport/window walks each frame -
+// harvesting only rebuilt cells would undercount on steady frames)
+static void sc_dbg_harvest(const u8 *mrow,int C,int mode8000,int ccols)
+{
+	u32 a,b,s0,aa,ab;
+	while(C>=ccols) C-=ccols;
+	s0=(8*C*sc_D)/sc_N;
+	{
+		int ia=(s0>>3)&31, ib=((s0>>3)+1)&31;
+		a=mrow[ia]; b=mrow[ib];
+		aa=sc_gbc?mrow[ia+0x2000]:0; ab=sc_gbc?mrow[ib+0x2000]:0;
+	}
+	if(!mode8000){ if(a<128)a+=256; if(b<128)b+=256; }
+	if(aa&8)a+=384; if(ab&8)b+=384;
+	{
+		u32 va=a|((aa&7)<<10)|(((aa>>5)&3)<<13);
+		u32 vb=b|((ab&7)<<10)|(((ab>>5)&3)<<13);
+		sc_varbits[va>>5]|=1u<<(va&31);
+		sc_varbits[vb>>5]|=1u<<(vb&31);
+	}
+	if((aa^ab)&7)
+	{
+		u32 pi=((aa&7)<<3)|(ab&7);
+		sc_pairbits[pi>>5]|=1u<<(pi&31);
+	}
+	if((aa|ab)&0x80) sc_prio_cnt++;
+}
+#endif
+
 // Look up the output tile for content column C (wrapped) of source row mrow.
 static u16 sc_cell_entry(const u8 *mrow,int C,int mode8000,int ccols)
 {
@@ -435,9 +483,8 @@ static u16 sc_cell_entry(const u8 *mrow,int C,int mode8000,int ccols)
 		u32 t=sc_lookup(a,b,p,f);
 		if(!t) return 0;            // budget exhausted: retry next frame
 		// v34: the cell's palette comes from whichever tile contributes
-		// the majority of its pixels (A-always painted B-dominated cells
-		// in A's palette = the wrong-palette column stripes)
-		return (u16)(t | (((sc_ph_bdom[p]?ab:aa)&7)<<12));
+		// the majority of its pixels. v35: rows 8-15 (see sc_load_palette)
+		return (u16)(t | ((8+((sc_ph_bdom[p]?ab:aa)&7))<<12));
 	}
 }
 
@@ -459,19 +506,21 @@ static void sc_stamp_slot(int mr,int slot)
 		sc_cell_gen[t-TILE_BASE]=sc_gen;
 }
 
-// v33: scaled BG uses GBA palette rows 0-7 = the 8 GBC BG palettes at
-// entries 1-4 (cell pixels 1..4 = GB colors 0..3; map entry carries the
-// row from the tile's attr). Normal mode keeps rows 8-15 (gamma copies
-// from transfer_palette_) - no conflict. DMG games use row 0 only.
+// v35: scaled BG uses rows 8-15 - the rows transfer_palette_ ALREADY
+// writes every vblank (gamma-adjusted, line-71 staged, white on LCD-off,
+// sgb_mask blanking, DMG/SGB colorization). We run after it in the same
+// vblank on every path (normal/busy/menu-open), so shift its entries
+// 0-3 up to 1-4 in place (cell pixels are 1..4). Rows 0-7 are never
+// touched again: the UI font rows (5-6) and border rows (1-4) keep
+// their palettes - S2 and the border clash die permanently.
 static void sc_load_palette(void)
 {
 	vu16 *pal=(vu16*)0x05000000;
-	u16 *src=(u16*)gbc_palette;
 	int p,n = gbc_mode ? 8 : 1;
 	for(p=0;p<n;p++)
 	{
-		pal[p*16+1]=src[p*4+0]; pal[p*16+2]=src[p*4+1];
-		pal[p*16+3]=src[p*4+2]; pal[p*16+4]=src[p*4+3];
+		vu16 *row=pal+(8+p)*16;
+		row[4]=row[3]; row[3]=row[2]; row[2]=row[1]; row[1]=row[0];
 	}
 	pal[0]=0;
 }
@@ -507,6 +556,12 @@ void scaling_scaled_frame(void)
 	}
 	sc_busy=1;
 #if SCALING_DEBUG
+	{	// v35 P1: reset the variant/pair/prio counters for this frame
+		int i;
+		for(i=0;i<1024;i++) sc_varbits[i]=0;
+		sc_pairbits[0]=sc_pairbits[1]=0;
+		sc_prio_cnt=0;
+	}
 	*(vu16*)0x05000000 = 0x001F;   // TIMING DEBUG: red while building
 #else
 	*(vu16*)0x05000000 = 0;        // pin the backdrop black NOW:
@@ -614,6 +669,17 @@ void scaling_scaled_frame(void)
 
 	sc_load_palette();
 
+	if(!(lcdc&0x80))
+	{	// v35: LCD off - freeze the builder entirely. The off-value LCDC
+		// would fire the 0x58 full invalidation and rebuild garbage from
+		// wrong map/tile selects; content already shows white for free
+		// (white_palette rows 8-15 through the shift). Dirty state simply
+		// accumulates and is consumed at LCD-on.
+		*(vu16*)0x05000000 = 0;
+		sc_busy=0;
+		return;
+	}
+
 	// ---- PHASE B: budgeted build work (may run past vblank safely) ----
 	// v30: the real limit is time (SC_TIME_UP in the convert paths); the
 	// count is a runaway backstop. Old fixed 64 starved tile-streaming
@@ -708,6 +774,10 @@ void scaling_scaled_frame(void)
 			}
 			P_=(rowscx[mr]*sc_N)/sc_D;
 			C0_=P_>>3;
+#if SCALING_DEBUG
+			for(j=0;j<ncontent;j++)
+				sc_dbg_harvest(gbmap+mr*32, C0_+j, mode8000, ccols);
+#endif
 			st = sc_row_c0[mr];
 			if(mdirty[mr]) { st=0xFFFF; sc_row_c0[mr]=0xFFFF; }
 			// (persist the invalidation NOW: if the rebuild below runs out
@@ -758,6 +828,10 @@ void scaling_scaled_frame(void)
 			int wr=r-wtop;
 			const u8 *mrow = wmap + wr*32;
 			vu16 *out = WIN_MAP + r*32;
+#if SCALING_DEBUG
+			for(j=0;j<wcols;j++)
+				sc_dbg_harvest(mrow, j, mode8000, ccols);
+#endif
 			if(wdirty[wr]) sc_wbuilt[r]=0;
 			if(sc_wbuilt[r])
 			{
@@ -792,7 +866,21 @@ void scaling_scaled_frame(void)
 
 	sc_sweep_cells();              // v34: leftover budget only
 
-	*(vu16*)0x05000000 = 0;        // TIMING DEBUG: work done -> black
+#if SCALING_DEBUG
+	{	// v35 P1: the STEADY border color carries the F-gate counters -
+		// G = variants/8, B = 2*mixed-pairs, R = prio-positions/8 (all
+		// clamped; black = zeros). Agents decode per-frame border RGB.
+		u32 i,v=0,pc=0,e;
+		for(i=0;i<1024;i++){ u32 w=sc_varbits[i]; while(w){ v++; w&=w-1; } }
+		for(i=0;i<2;i++){ u32 w=sc_pairbits[i]; while(w){ pc++; w&=w-1; } }
+		e  = (v>=248 ? 31u : v>>3)<<5;
+		e |= (pc>=16 ? 31u : pc*2)<<10;
+		e |= ((u32)sc_prio_cnt>=248 ? 31u : (u32)sc_prio_cnt>>3);
+		*(vu16*)0x05000000 = (u16)e;
+	}
+#else
+	*(vu16*)0x05000000 = 0;        // backdrop black (borders)
+#endif
 	sc_busy=0;
 }
 
@@ -826,7 +914,9 @@ void scaling_fix_oam(void)
 	{
 		u16 a0=oam[i*4], a1=oam[i*4+1];
 		int x,y,flips,s;
-		if((a0&0x0300)==0x0200) continue;
+		// v35: bit9 set = disabled (10) or already affine+double (11) -
+		// skip both; converting twice would double-apply the position map
+		if(a0&0x0200) continue;
 		x = a1 & 0x1FF;                        // = gbX_hw + 32
 		s = x-40;                              // source screen x
 		x = fit ? (xb + ((s*9+7)>>3) - 3)      // ceil(9s/8) - pad(16-9)/2

@@ -279,10 +279,20 @@ AfterLoadState:
 	
 	bl_long copy_gbc_palette
 	bl_long transfer_palette
+	@v35: in scaled mode the normal renders below would overwrite the live
+	@cell cache and scaled maps AND consume the all-dirty bits the scaler
+	@needs; force a scaler re-entry (full reset + rebuild next frame)
+	ldr r0,=g_scale_mode
+	ldrb r0,[r0]
+	movs r0,r0
+	bne 9f
 	bl_long display_sprites
 	@these destroy r10
 	bl_long render_dirty_tiles
 	bl_long render_dirty_bg
-	
+	b 8f
+9:
+	blx_long scaling_enter
+8:
 	ldmfd sp!,{r3-r11,lr}
 	bx lr
