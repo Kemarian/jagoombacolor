@@ -107,17 +107,24 @@ static u8 sc_wst_cnt;     // vblank sample flip-flops without debounce
 #if SCALING_DEBUG
 EWRAM_BSS static u32 sc_varbits[1024]; // v35 P1: 32768-bit map of visible
                                        // (tile+bank,pal,flips) variants
+EWRAM_BSS static u8 sc_colia[48];      // v36: per-column ia (kills the
+                                       // per-harvest software division)
 static u32 sc_pairbits[2];             // ordered mixed (palA,palB) pairs
 static u16 sc_prio_cnt;                // attr-bit7 positions this frame
+static u8  sc_dbg_on;                  // v36: sample 1 frame in 8 - the
+                                       // full-walk telemetry cost starved
+                                       // the sweep when run every frame
+static u16 sc_dbg_col;                 // last computed border encoding
 #endif
 static u8 sc_sweep_active;          // dirty-reconvert sweep in progress
-static u8 sc_sweep_wrap;            // v34: merge arrived mid-pass - do one
-                                    // more full pass instead of restarting
-                                    // (restart-per-merge starved the
-                                    // viewport forever in tile-animating
-                                    // games = the LADX post-load freeze)
-static u16 sc_sweep_obj;            // next OBJ tile pair (0..128)
 static u16 sc_sweep_cell;           // next cache cell
+EWRAM_BSS static u32 sc_objdirty[12];   // v36: OBJ-owned dirty mirror,
+                                        // consumed independently of the
+                                        // cell sweep (shared cursor left
+                                        // new sprite uploads unconverted)
+EWRAM_BSS static u32 sc_dirty_pend[12]; // v36: merges arriving mid-pass;
+                                        // becomes the next pass (bounded,
+                                        // replaces accumulate-forever)
 
 static void sc_build_tables(void)
 {
@@ -160,6 +167,13 @@ static void sc_build_tables(void)
 		}
 		sc_ph_bdom[p]=(u8)(nb_>4);
 	}
+#if SCALING_DEBUG
+	for(x=0;x<48;x++)
+	{	// v36: telemetry column->ia table (no division in the harvest)
+		int s0=(8*x*sc_D)/sc_N;
+		sc_colia[x]=(u8)((s0>>3)&31);
+	}
+#endif
 }
 
 // Convert one output tile: pair (a,b) at phase p -> 8 rows of 8 nibbles
@@ -214,6 +228,8 @@ static void sc_full_reset(void)
 	for(i=0;i<18;i++) sc_wbuilt[i]=0;
 	for(i=0;i<32;i++) sc_row_c0[i]=0xFFFF;
 	sc_ncells=0; sc_tombs=0; sc_evict_ptr=0;
+	{ int k; for(k=0;k<12;k++){ sc_dirty_snap[k]=0; sc_dirty_pend[k]=0; sc_objdirty[k]=0; } }
+	sc_sweep_active=0; sc_sweep_cell=0;
 	for(i=0;i<8;i++) bt[i]=0;
 	m=SCALED_MAP; for(i=0;i<0x800;i++) m[i]=blank;   // both blocks (64x32)
 	m=WIN_MAP;    for(i=0;i<0x400;i++) m[i]=blank;
@@ -322,48 +338,54 @@ static void sc_update_dirty(void)
 	int i;
 	u32 acc=0;
 	for(i=0;i<12;i++)
-	{	// ACCUMULATE into the snapshot: it persists until a sweep finishes
+	{
 		u32 d=DIRTY_TILE_BITS[i];
-		if(d) { sc_dirty_snap[i]|=d; acc|=d; DIRTY_TILE_BITS[i]=0; }
+		if(d)
+		{
+			sc_objdirty[i]|=d;                       // v36: OBJ's own copy
+			if(sc_sweep_active) sc_dirty_pend[i]|=d; // next pass
+			else                sc_dirty_snap[i]|=d; // this pass
+			acc|=d;
+			DIRTY_TILE_BITS[i]=0;
+		}
 	}
 	if(acc)
-	{	// v34: a write behind an active cursor is caught by ONE wrap pass
-		// at the end instead of restarting the cursor (v26's restart made
-		// the sweep O(cache) per animation tick and starved the viewport)
+	{
 		VRAM_chr_lastAddr=0xFF;
-		if(sc_sweep_active) sc_sweep_wrap=1;
-		else { sc_sweep_active=1; sc_sweep_obj=0; sc_sweep_cell=0; }
+		if(!sc_sweep_active) { sc_sweep_active=1; sc_sweep_cell=0; }
 #if SCALING_DEBUG
 		*(vu16*)0x05000000 = 0x7C1F;   // CAUSE DEBUG: magenta = sweep restart
 #endif
 	}
-	if(!sc_sweep_active) return;
 
-	// OBJ tiles first, on their OWN budget: OAM may already reference the
-	// new tile index this frame, so a deferred OBJ convert = torn sprite.
+	// v36: OBJ conversion consumes its OWN dirty mirror every frame,
+	// clearing bits as it converts - fully independent of the cell-sweep
+	// cursor (which could churn for many passes while new sprite uploads
+	// waited = the Marin-instead-of-Link bug). Bank-aware per v35.
 	{
-		int obudget=64;               // v30: conversions are cheap now
-		while(sc_sweep_obj<128 && obudget>0 && sc_budget>0)
+		int obudget=32;
+		u32 t;
+		for(t=0;t<256 && obudget>0;t+=2)
 		{
-			u32 t=sc_sweep_obj*2;
-			// v35: test EACH bank's dirty bit (bank-1 writes set bits at
-			// id+384; testing only bank 0 left bank-1 sprite pixels stale
-			// = the LADX Link split and the room-entry "palette lag")
-			int d0=TILE_DIRTY(t), d1=TILE_DIRTY(t+384);
-			sc_sweep_obj++;
+			u32 w0=t>>6, b0=(t>>1)&31;      // bank0 bit for pair t
+			u32 w1=w0+6;                    // bank1 bits: +384 ids = +6 words,
+			                                // same bit position (192%32==0)
+			int d0=(sc_objdirty[w0]>>b0)&1;
+			int d1=(sc_objdirty[w1]>>b0)&1;
 			if(!(d0|d1)) continue;
 			if(d0)
 			{
 				sc_convert_obj(XGB_VRAM+t*16,        (u32*)(OBJ_TILES+t*32));
 				sc_convert_obj(XGB_VRAM+(t+1)*16,    (u32*)(OBJ_TILES+(t+1)*32));
+				sc_objdirty[w0]&=~(1u<<b0);
 			}
 			if(d1)
 			{
 				sc_convert_obj(XGB_VRAM+0x2000+t*16,    (u32*)(OBJ_TILES+0x2000+t*32));
 				sc_convert_obj(XGB_VRAM+0x2000+(t+1)*16,(u32*)(OBJ_TILES+0x2000+(t+1)*32));
+				sc_objdirty[w1]&=~(1u<<b0);
 			}
 			obudget--;
-			if(SC_TIME_UP()) sc_budget=0;   // v35: sticky deadline
 		}
 	}
 }
@@ -406,17 +428,24 @@ static void sc_sweep_cells(void)
 		}
 		sc_sweep_cell++;
 	}
-	if(sc_sweep_obj>=128 && sc_sweep_cell>=sc_ncells)
-	{
-		if(sc_sweep_wrap)
-		{	// merges arrived mid-pass: one more pass covers anything the
-			// cursor had already passed when its tiles went dirty
-			sc_sweep_wrap=0;
-			sc_sweep_obj=0;
+	if(sc_sweep_cell>=sc_ncells)
+	{	// v36: pass done. Anything that went dirty mid-pass became the
+		// PENDING set - swap it in as the next pass (bounded work per
+		// pass; the old accumulate+wrap grew the snapshot without limit
+		// under constant tile animation)
+		int pend=0;
+		for(i=0;i<12;i++) if(sc_dirty_pend[i]) { pend=1; break; }
+		if(pend)
+		{
+			for(i=0;i<12;i++)
+			{
+				sc_dirty_snap[i]=sc_dirty_pend[i];
+				sc_dirty_pend[i]=0;
+			}
 			sc_sweep_cell=0;
 		}
 		else
-		{	// sweep complete: everything converted from current tile data
+		{
 			sc_sweep_active=0;
 			for(i=0;i<12;i++) sc_dirty_snap[i]=0;
 		}
@@ -429,11 +458,10 @@ static void sc_sweep_cells(void)
 // harvesting only rebuilt cells would undercount on steady frames)
 static void sc_dbg_harvest(const u8 *mrow,int C,int mode8000,int ccols)
 {
-	u32 a,b,s0,aa,ab;
+	u32 a,b,aa,ab;
 	while(C>=ccols) C-=ccols;
-	s0=(8*C*sc_D)/sc_N;
 	{
-		int ia=(s0>>3)&31, ib=((s0>>3)+1)&31;
+		int ia=sc_colia[C], ib=(ia+1)&31;
 		a=mrow[ia]; b=mrow[ib];
 		aa=sc_gbc?mrow[ia+0x2000]:0; ab=sc_gbc?mrow[ib+0x2000]:0;
 	}
@@ -556,7 +584,9 @@ void scaling_scaled_frame(void)
 	}
 	sc_busy=1;
 #if SCALING_DEBUG
-	{	// v35 P1: reset the variant/pair/prio counters for this frame
+	sc_dbg_on = ((sc_gen&7)==0);   // v36: sample 1-in-8 frames
+	if(sc_dbg_on)
+	{	// reset the variant/pair/prio counters for this sample frame
 		int i;
 		for(i=0;i<1024;i++) sc_varbits[i]=0;
 		sc_pairbits[0]=sc_pairbits[1]=0;
@@ -775,8 +805,9 @@ void scaling_scaled_frame(void)
 			P_=(rowscx[mr]*sc_N)/sc_D;
 			C0_=P_>>3;
 #if SCALING_DEBUG
-			for(j=0;j<ncontent;j++)
-				sc_dbg_harvest(gbmap+mr*32, C0_+j, mode8000, ccols);
+			if(sc_dbg_on)
+				for(j=0;j<ncontent;j++)
+					sc_dbg_harvest(gbmap+mr*32, C0_+j, mode8000, ccols);
 #endif
 			st = sc_row_c0[mr];
 			if(mdirty[mr]) { st=0xFFFF; sc_row_c0[mr]=0xFFFF; }
@@ -829,8 +860,9 @@ void scaling_scaled_frame(void)
 			const u8 *mrow = wmap + wr*32;
 			vu16 *out = WIN_MAP + r*32;
 #if SCALING_DEBUG
-			for(j=0;j<wcols;j++)
-				sc_dbg_harvest(mrow, j, mode8000, ccols);
+			if(sc_dbg_on)
+				for(j=0;j<wcols;j++)
+					sc_dbg_harvest(mrow, j, mode8000, ccols);
 #endif
 			if(wdirty[wr]) sc_wbuilt[r]=0;
 			if(sc_wbuilt[r])
@@ -867,17 +899,20 @@ void scaling_scaled_frame(void)
 	sc_sweep_cells();              // v34: leftover budget only
 
 #if SCALING_DEBUG
+	if(sc_dbg_on)
 	{	// v35 P1: the STEADY border color carries the F-gate counters -
 		// G = variants/8, B = 2*mixed-pairs, R = prio-positions/8 (all
-		// clamped; black = zeros). Agents decode per-frame border RGB.
+		// clamped; black = zeros). Sampled 1-in-8 frames; the color
+		// persists between samples. Agents decode per-frame border RGB.
 		u32 i,v=0,pc=0,e;
 		for(i=0;i<1024;i++){ u32 w=sc_varbits[i]; while(w){ v++; w&=w-1; } }
 		for(i=0;i<2;i++){ u32 w=sc_pairbits[i]; while(w){ pc++; w&=w-1; } }
 		e  = (v>=248 ? 31u : v>>3)<<5;
 		e |= (pc>=16 ? 31u : pc*2)<<10;
 		e |= ((u32)sc_prio_cnt>=248 ? 31u : (u32)sc_prio_cnt>>3);
-		*(vu16*)0x05000000 = (u16)e;
+		sc_dbg_col=(u16)e;
 	}
+	*(vu16*)0x05000000 = sc_dbg_col;
 #else
 	*(vu16*)0x05000000 = 0;        // backdrop black (borders)
 #endif
